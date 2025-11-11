@@ -69,9 +69,14 @@ try:
         calculate_ncc_3d,
         find_optimal_rotation_z,
         apply_rotation_z,
+        find_optimal_rotation_x,
+        apply_rotation_x,
         find_optimal_y_shift_central_bscan,
         visualize_rotation_search,
-        visualize_rotation_comparison
+        visualize_rotation_comparison,
+        calculate_windowed_y_offsets,
+        apply_windowed_y_alignment,
+        visualize_windowed_offsets
     )
     ROTATION_AVAILABLE = True
 except ImportError:
@@ -451,6 +456,206 @@ def step3_rotation_z(step1_results, step2_results, data_dir):
     return results
 
 
+def step3_5_rotation_x(step1_results, step2_results, step3_results, data_dir):
+    """
+    Step 3.5: X-axis rotation alignment (Y-Z plane / sagittal view alignment).
+
+    Corrects pitch/tilt misalignment visible in the Y-axis view (coronal/sagittal plane).
+    Uses ECC-style correlation on sagittal slices to find optimal rotation angle.
+
+    Args:
+        step1_results: Dictionary from step1_xz_alignment
+        step2_results: Dictionary from step2_y_alignment
+        step3_results: Dictionary from step3_rotation_z (Z-axis rotation)
+        data_dir: Path to data directory for saving results
+
+    Returns:
+        Dictionary with X-axis rotation results including:
+        - rotation_angle_x: Optimal X-axis rotation angle (degrees)
+        - rotation_correlation_x: Correlation score at optimal rotation
+        - ncc_before_x/ncc_after_x: Alignment quality before/after X-rotation
+        - overlap_v1_fully_rotated: Volume with both Z and X rotations applied
+    """
+    if not ROTATION_AVAILABLE:
+        print("\n⚠️  Rotation module not available. Skipping Step 3.5.")
+        return None
+
+    print("\n" + "="*70)
+    print("STEP 3.5: X-AXIS ROTATION ALIGNMENT (Y-Z PLANE)")
+    print("="*70)
+    print("  Goal: Align retinal layers visible in Y-axis view (sagittal/coronal plane)")
+    print("  Method: ECC-style correlation on central sagittal slice")
+    print("="*70)
+
+    overlap_v0 = step1_results['overlap_v0']
+    overlap_v1_z_rotated = step3_results['overlap_v1_rotated']
+
+    # Calculate NCC before X-rotation (after Z-rotation)
+    print("\n1. Calculating baseline NCC (after Z-rotation, before X-rotation)...")
+    ncc_before_x = calculate_ncc_3d(overlap_v0, overlap_v1_z_rotated)
+    print(f"  Baseline NCC: {ncc_before_x:.4f}")
+
+    # Find optimal X-axis rotation angle
+    print("\n2. Finding optimal X-axis rotation angle...")
+    rotation_angle_x, rotation_metrics_x = find_optimal_rotation_x(
+        overlap_v0,
+        overlap_v1_z_rotated,
+        coarse_range=10,
+        coarse_step=1,
+        fine_range=3,
+        fine_step=0.5,
+        verbose=True,
+        visualize_masks=True,
+        mask_vis_path=data_dir / 'step3_5_mask_verification.png'
+    )
+
+    correlation_optimal_x = rotation_metrics_x['optimal_correlation']
+
+    # Apply X-axis rotation
+    print(f"\n3. Applying X-axis rotation: {rotation_angle_x:+.2f}°...")
+    overlap_v1_fully_rotated = apply_rotation_x(
+        overlap_v1_z_rotated,
+        rotation_angle_x,
+        axes=(0, 2)
+    )
+
+    # Verify final NCC
+    print(f"\n4. Final verification...")
+    ncc_after_x = calculate_ncc_3d(overlap_v0, overlap_v1_fully_rotated)
+    print(f"  NCC after X-rotation: {ncc_after_x:.4f}")
+
+    # Calculate improvement from X-rotation
+    improvement_x = (ncc_after_x - ncc_before_x) * 100
+    print(f"\n  X-rotation NCC improvement: {ncc_before_x:.4f} → {ncc_after_x:.4f} ({improvement_x:+.2f}%)")
+    print(f"  Optimal X-axis rotation: {rotation_angle_x:+.2f}°")
+    print(f"  Correlation at optimal: {correlation_optimal_x:.4f}")
+
+    # Calculate total improvement (from Step 3 baseline)
+    ncc_step3_before = step3_results['ncc_before']
+    total_improvement = (ncc_after_x - ncc_step3_before) * 100
+    print(f"\n  Total improvement (Steps 3 + 3.5): {ncc_step3_before:.4f} → {ncc_after_x:.4f} ({total_improvement:+.2f}%)")
+
+    results = {
+        # X-axis rotation (Step 3.5)
+        'rotation_angle_x': float(rotation_angle_x),
+        'rotation_correlation_x': float(correlation_optimal_x),
+        'coarse_results_x': rotation_metrics_x['coarse_results'],
+        'fine_results_x': rotation_metrics_x['fine_results'],
+        # NCC metrics
+        'ncc_before_x': float(ncc_before_x),  # After Z-rotation
+        'ncc_after_x': float(ncc_after_x),    # After both rotations
+        'ncc_improvement_x_percent': float(improvement_x),
+        'ncc_total_improvement_percent': float(total_improvement),
+        # Final volume with both rotations
+        'overlap_v1_fully_rotated': overlap_v1_fully_rotated
+    }
+
+    print("\n✓ Step 3.5 complete (X-axis rotation for Y-Z plane alignment)!")
+    print("="*70)
+
+    return results
+
+
+def step4_windowed_y_alignment(step1_results, step3_results, data_dir):
+    """
+    Step 4: Windowed per-B-scan Y-axis alignment.
+
+    Samples every 20th B-scan, calculates Y-offset using surface matching,
+    then interpolates smoothly between sampled positions using cubic spline.
+
+    Args:
+        step1_results: Dictionary from step1_xz_alignment
+        step3_results: Dictionary from step3_5_rotation_x (with both rotations)
+        data_dir: Path to data directory for saving results
+
+    Returns:
+        Dictionary with windowed alignment results including:
+        - overlap_v1_final: Volume with windowed Y-alignment applied
+        - y_offsets_interpolated: (Z,) array of interpolated Y-shifts
+        - sampled_offsets: Calculated offsets at sampled positions
+        - sampled_positions: Z-indices of sampled B-scans
+        - confidences: Confidence scores at sampled positions
+        - ncc_before/ncc_after: Alignment quality metrics
+    """
+    if not ROTATION_AVAILABLE:
+        print("\n⚠️  Rotation module not available. Skipping Step 4.")
+        return None
+
+    print("\n" + "="*70)
+    print("STEP 4: WINDOWED Y-AXIS ALIGNMENT")
+    print("="*70)
+    print("  Method: Surface-based sampling with cubic spline interpolation")
+    print("  Window size: 20 B-scans")
+    print("="*70)
+
+    overlap_v0 = step1_results['overlap_v0']
+    overlap_v1_rotated = step3_results['overlap_v1_fully_rotated']
+
+    # Calculate NCC before windowed alignment
+    print("\n1. Baseline verification...")
+    ncc_before = calculate_ncc_3d(overlap_v0, overlap_v1_rotated)
+    print(f"  NCC before windowed alignment: {ncc_before:.4f}")
+
+    # Calculate windowed Y-offsets
+    print("\n2. Calculating windowed Y-offsets...")
+    y_offsets, sampled_offsets, sampled_positions, confidences = calculate_windowed_y_offsets(
+        overlap_v0,
+        overlap_v1_rotated,
+        window_size=20,
+        outlier_threshold=50,
+        verbose=True
+    )
+
+    # Apply windowed alignment
+    print("\n3. Applying windowed Y-alignment...")
+    overlap_v1_final = apply_windowed_y_alignment(
+        overlap_v1_rotated,
+        y_offsets,
+        verbose=True
+    )
+
+    # Verify improvement
+    print(f"\n4. Final verification...")
+    ncc_after = calculate_ncc_3d(overlap_v0, overlap_v1_final)
+    print(f"  NCC after windowed alignment: {ncc_after:.4f}")
+
+    improvement = (ncc_after - ncc_before) * 100
+    print(f"\n  Windowed alignment improvement: {ncc_before:.4f} → {ncc_after:.4f} ({improvement:+.2f}%)")
+
+    # Calculate total improvement from Step 3 baseline
+    ncc_step3_baseline = step3_results['ncc_before']  # Before any rotations
+    total_improvement = (ncc_after - ncc_step3_baseline) * 100
+    print(f"  Total improvement (Steps 3 + 3.5 + 4): {ncc_step3_baseline:.4f} → {ncc_after:.4f} ({total_improvement:+.2f}%)")
+
+    # Visualize offsets
+    print("\n5. Creating visualization...")
+    visualize_windowed_offsets(
+        y_offsets,
+        sampled_offsets,
+        sampled_positions,
+        confidences,
+        output_path=data_dir / 'step4_windowed_offsets.png'
+    )
+
+    results = {
+        'overlap_v1_final': overlap_v1_final,
+        'y_offsets_interpolated': y_offsets,
+        'sampled_offsets': sampled_offsets,
+        'sampled_positions': sampled_positions,
+        'confidences': confidences,
+        'window_size': 20,
+        'ncc_before_windowed': float(ncc_before),
+        'ncc_after_windowed': float(ncc_after),
+        'ncc_improvement_windowed_percent': float(improvement),
+        'ncc_total_improvement_percent': float(total_improvement)
+    }
+
+    print("\n✓ Step 4 complete (windowed Y-axis alignment)!")
+    print("="*70)
+
+    return results
+
+
 # ============================================================================
 # VISUALIZATION
 # ============================================================================
@@ -753,11 +958,18 @@ def visualize_surfaces_after_xz(volume_0, volume_1, volume_1_xz_aligned, step1_r
 # 3D VISUALIZATION
 # ============================================================================
 
-def generate_3d_visualizations(volume_0, step1_results, step2_results, data_dir):
+def generate_3d_visualizations(volume_0, step1_results, step2_results, data_dir, volume_1_aligned=None):
     """
     Generate 3D visualizations after all steps complete.
 
     Creates merged volume and multi-angle 3D projections.
+
+    Args:
+        volume_0: Reference volume
+        step1_results: Results from Step 1
+        step2_results: Results from Step 2
+        data_dir: Output directory
+        volume_1_aligned: Pre-aligned volume (optional, if None will be reconstructed)
     """
     if not VISUALIZATION_AVAILABLE:
         print("\n⚠️  3D visualization module not available. Skipping visualizations.")
@@ -767,17 +979,24 @@ def generate_3d_visualizations(volume_0, step1_results, step2_results, data_dir)
     print("GENERATING 3D VISUALIZATIONS")
     print("="*70)
 
-    # Get aligned volume
-    volume_1_xz_aligned = step1_results['volume_1_xz_aligned']
+    # Get y_shift for transform dict
     y_shift = step2_results['y_shift']
 
-    # Apply Y shift to full volume 1
-    print("\n1. Applying Y shift to full volume...")
-    volume_1_aligned = ndimage.shift(
-        volume_1_xz_aligned, shift=(y_shift, 0, 0),
-        order=1, mode='constant', cval=0
-    )
-    print(f"  ✓ Volume 1 fully aligned: {volume_1_aligned.shape}")
+    # Use provided aligned volume or reconstruct it
+    if volume_1_aligned is None:
+        # Get aligned volume
+        volume_1_xz_aligned = step1_results['volume_1_xz_aligned']
+
+        # Apply Y shift to full volume 1
+        print("\n1. Applying Y shift to full volume...")
+        volume_1_aligned = ndimage.shift(
+            volume_1_xz_aligned, shift=(y_shift, 0, 0),
+            order=1, mode='constant', cval=0
+        )
+        print(f"  ✓ Volume 1 fully aligned: {volume_1_aligned.shape}")
+    else:
+        print("\n1. Using pre-aligned volume (with rotations applied)...")
+        print(f"  ✓ Volume 1 fully aligned: {volume_1_aligned.shape}")
 
     # Build transform dict
     transform_3d = {
@@ -820,9 +1039,9 @@ def generate_3d_visualizations(volume_0, step1_results, step2_results, data_dir)
     )
 
     # Save merged volume
-    print("\n4. Saving merged volume...")
-    np.save(data_dir / 'merged_volume_3d.npy', merged_volume)
-    print(f"  ✓ Saved: {data_dir / 'merged_volume_3d.npy'}")
+    # print("\n4. Saving merged volume...")
+    # np.save(data_dir / 'merged_volume_3d.npy', merged_volume)
+    # print(f"  ✓ Saved: {data_dir / 'merged_volume_3d.npy'}")
 
     print("\n" + "="*70)
     print("✅ 3D VISUALIZATIONS COMPLETE!")
@@ -830,7 +1049,6 @@ def generate_3d_visualizations(volume_0, step1_results, step2_results, data_dir)
     print(f"\nGenerated files:")
     print(f"  - 3d_merged_multiangle.png (4 angle views)")
     print(f"  - 3d_comparison_sidebyside.png (side-by-side)")
-    print(f"  - merged_volume_3d.npy ({merged_volume.nbytes / 1024**2:.1f} MB)")
 
 
 # ============================================================================
@@ -992,12 +1210,27 @@ Examples:
                 print("\nLoading Step 2 results...")
                 step2_results = np.load(data_dir / 'step2_results.npy', allow_pickle=True).item()
 
+            # Step 3: Z-axis rotation (B-scan alignment)
             step3_results = step3_rotation_z(step1_results, step2_results, data_dir)
 
             if step3_results is not None:
                 visualize_step3(step1_results, step2_results, step3_results, data_dir)
 
-                # Save
+                # Step 3.5: X-axis rotation (Y-Z plane alignment)
+                step3_5_results = step3_5_rotation_x(step1_results, step2_results, step3_results, data_dir)
+
+                if step3_5_results is not None:
+                    # Merge Step 3.5 results into step3_results
+                    step3_results = {**step3_results, **step3_5_results}
+
+                    # Step 4: Windowed Y-axis alignment
+                    step4_results = step4_windowed_y_alignment(step1_results, step3_results, data_dir)
+
+                    if step4_results is not None:
+                        # Merge Step 4 results into step3_results
+                        step3_results = {**step3_results, **step4_results}
+
+                # Save (includes Steps 3, 3.5, and 4 results)
                 combined_results = {**step1_results, **step2_results, **step3_results}
                 np.save(data_dir / 'step3_results.npy', combined_results, allow_pickle=True)
 
@@ -1014,31 +1247,69 @@ Examples:
         print(f"Step 2 (Y): ΔY={step2_results['y_shift']:+.2f}")
         print(f"  Centers: V0={step2_results['center_y_v0']:.2f}, V1={step2_results['center_y_v1']:.2f}")
     if step3_results:
-        print(f"Step 3 (Rotation): θ={step3_results['rotation_angle']:+.2f}° (NCC: {step3_results['ncc_before']:.4f}→{step3_results['ncc_final']:.4f})")
+        print(f"Step 3 (Z-rotation): θZ={step3_results['rotation_angle']:+.2f}° (NCC: {step3_results['ncc_before']:.4f}→{step3_results['ncc_final']:.4f})")
+        if 'rotation_angle_x' in step3_results:
+            print(f"Step 3.5 (X-rotation): θX={step3_results['rotation_angle_x']:+.2f}° (NCC: {step3_results['ncc_before_x']:.4f}→{step3_results['ncc_after_x']:.4f})")
+        if 'ncc_after_windowed' in step3_results:
+            print(f"Step 4 (Windowed Y): Sampled {len(step3_results['sampled_positions'])} positions, window=20 (NCC: {step3_results['ncc_before_windowed']:.4f}→{step3_results['ncc_after_windowed']:.4f})")
+            print(f"  Total improvement (Steps 3+3.5+4): {step3_results['ncc_before']:.4f}→{step3_results['ncc_after_windowed']:.4f} ({step3_results['ncc_total_improvement_percent']:+.2f}%)")
 
     # Generate 3D visualizations if requested
     if args.visual:
         if step1_results and step2_results:
+            volume_1_aligned = None  # Will be set if rotations are available
+
             # Use rotated volume if available, otherwise Y-aligned
             if step3_results:
-                print("\nℹ️  Using Step 3 (rotated) volume for 3D visualization")
-                # Apply rotation to full volume for merging
+                rotation_angle_z = step3_results['rotation_angle']
+
+                # Check if Step 3.5 (X-rotation) was also performed
+                if 'rotation_angle_x' in step3_results:
+                    print("\nℹ️  Using Step 3 + 3.5 (both Z and X rotations) for 3D visualization")
+                    rotation_angle_x = step3_results['rotation_angle_x']
+                else:
+                    print("\nℹ️  Using Step 3 (Z-rotation only) for 3D visualization")
+                    rotation_angle_x = None
+
+                # Apply transformations to full volume for merging
                 volume_1_xz_aligned = step1_results['volume_1_xz_aligned']
                 y_shift = step2_results['y_shift']
-                rotation_angle = step3_results['rotation_angle']
 
-                # Apply Y shift + rotation to full volume
+                # Apply Y shift
                 volume_1_aligned = ndimage.shift(
                     volume_1_xz_aligned, shift=(y_shift, 0, 0),
                     order=1, mode='constant', cval=0
                 )
-                volume_1_aligned = apply_rotation_z(volume_1_aligned, rotation_angle, axes=(0, 1))
 
-                # Update step2_results for visualization
-                step2_results_with_rotation = step2_results.copy()
-                step2_results_with_rotation['y_shift'] = y_shift
+                # Apply Z-axis rotation (B-scan alignment)
+                volume_1_aligned = apply_rotation_z(volume_1_aligned, rotation_angle_z, axes=(0, 1))
 
-            generate_3d_visualizations(volume_0, step1_results, step2_results, data_dir)
+                # Apply X-axis rotation if available (Y-Z plane alignment)
+                if rotation_angle_x is not None:
+                    volume_1_aligned = apply_rotation_x(volume_1_aligned, rotation_angle_x, axes=(0, 2))
+
+                # Apply windowed Y-alignment if available (Step 4)
+                if 'y_offsets_interpolated' in step3_results:
+                    print("  Applying windowed Y-offsets to full volume...")
+                    y_offsets_overlap = step3_results['y_offsets_interpolated']
+
+                    # Extend offsets to match full volume size if needed
+                    if volume_1_aligned.shape[2] > len(y_offsets_overlap):
+                        # Pad with edge values
+                        pad_size = volume_1_aligned.shape[2] - len(y_offsets_overlap)
+                        y_offsets_full = np.pad(y_offsets_overlap, (0, pad_size), mode='edge')
+                    else:
+                        y_offsets_full = y_offsets_overlap
+
+                    volume_1_aligned = apply_windowed_y_alignment(
+                        volume_1_aligned,
+                        y_offsets_full,
+                        verbose=False
+                    )
+
+            # Pass the fully aligned volume (with all transformations) to visualization
+            # If volume_1_aligned is None, the function will reconstruct it with just Y-shift
+            generate_3d_visualizations(volume_0, step1_results, step2_results, data_dir, volume_1_aligned=volume_1_aligned)
         else:
             print("\n⚠️  Cannot generate 3D visualizations: Both steps 1 and 2 must be run")
             print("     Use: --all --visual  or  --steps 1 2 --visual")

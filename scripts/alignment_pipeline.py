@@ -8,7 +8,8 @@ Steps:
   1. XZ alignment (vessel-enhanced phase correlation)
      - Includes surface visualization (X/Y slices)
   2. Y alignment (center of mass matching)
-  3. Rotation alignment (tissue-based, coming next)
+  3. Rotation alignment (RCP-based for parallel layers)
+     3.1: Y-axis re-alignment on central B-scan (NCC search)
 
 Visualizations:
   - Step 1: Automatically generates surface X/Y slice views
@@ -18,12 +19,13 @@ Usage:
     # Run specific step
     python alignment_pipeline.py --step 1
     python alignment_pipeline.py --step 2
+    python alignment_pipeline.py --step 3  # Includes 3.1 automatically
 
     # Run all steps
     python alignment_pipeline.py --all
 
-    # Run steps 1-2
-    python alignment_pipeline.py --steps 1 2
+    # Run steps 1-3
+    python alignment_pipeline.py --steps 1 2 3
 """
 
 import sys
@@ -61,6 +63,20 @@ try:
 except ImportError:
     SURFACE_VIS_AVAILABLE = False
     print("⚠️  Warning: Surface visualization module not available")
+
+try:
+    from rotation_alignment import (
+        calculate_ncc_3d,
+        find_optimal_rotation_z,
+        apply_rotation_z,
+        find_optimal_y_shift_central_bscan,
+        visualize_rotation_search,
+        visualize_rotation_comparison
+    )
+    ROTATION_AVAILABLE = True
+except ImportError:
+    ROTATION_AVAILABLE = False
+    print("⚠️  Warning: Rotation alignment module not available")
 
 
 # ============================================================================
@@ -197,36 +213,39 @@ def step1_xz_alignment(volume_0, volume_1, data_dir):
     )
 
     # Calculate overlap bounds
+    # IMPORTANT: After shifting, both volumes are in the SAME coordinate system!
+    # We extract the SAME region from both, avoiding zero-padding from the shift.
     Y, X, Z = volume_0.shape
 
+    # Determine valid region (where both volumes have non-padded data)
     if offset_x >= 0:
-        x0_start, x0_end = offset_x, X
-        x1_start, x1_end = 0, X - offset_x
+        # Volume_1 shifted RIGHT -> zeros on left side of volume_1_xz_aligned
+        x_start, x_end = offset_x, X
     else:
-        x0_start, x0_end = 0, X + offset_x
-        x1_start, x1_end = -offset_x, X
+        # Volume_1 shifted LEFT -> zeros on right side of volume_1_xz_aligned
+        x_start, x_end = 0, X + offset_x
 
     if offset_z >= 0:
-        z0_start, z0_end = offset_z, Z
-        z1_start, z1_end = 0, Z - offset_z
+        # Volume_1 shifted FORWARD -> zeros on front of volume_1_xz_aligned
+        z_start, z_end = offset_z, Z
     else:
-        z0_start, z0_end = 0, Z + offset_z
-        z1_start, z1_end = -offset_z, Z
+        # Volume_1 shifted BACKWARD -> zeros on back of volume_1_xz_aligned
+        z_start, z_end = 0, Z + offset_z
 
+    # Extract SAME region from both volumes (both are now in same coordinate system!)
     overlap_bounds = {
-        'v0': {'x': (x0_start, x0_end), 'z': (z0_start, z0_end)},
-        'v1': {'x': (x1_start, x1_end), 'z': (z1_start, z1_end)},
-        'size': (Y, x0_end - x0_start, z0_end - z0_start)
+        'x': (x_start, x_end),
+        'z': (z_start, z_end),
+        'size': (Y, x_end - x_start, z_end - z_start)
     }
 
-    print(f"\n  Overlap region:")
-    print(f"    V0: X[{x0_start}:{x0_end}], Z[{z0_start}:{z0_end}]")
-    print(f"    V1: X[{x1_start}:{x1_end}], Z[{z1_start}:{z1_end}]")
+    print(f"\n  Overlap region (same for both volumes):")
+    print(f"    X[{x_start}:{x_end}], Z[{z_start}:{z_end}]")
     print(f"    Size: {overlap_bounds['size']}")
 
-    # Extract overlap regions
-    overlap_v0 = volume_0[:, x0_start:x0_end, z0_start:z0_end].copy()
-    overlap_v1 = volume_1_xz_aligned[:, x1_start:x1_end, z1_start:z1_end].copy()
+    # Extract overlap regions - SAME indices for both!
+    overlap_v0 = volume_0[:, x_start:x_end, z_start:z_end].copy()
+    overlap_v1 = volume_1_xz_aligned[:, x_start:x_end, z_start:z_end].copy()
 
     # Save
     results = {
@@ -300,6 +319,133 @@ def step2_y_alignment(step1_results, data_dir):
     }
 
     print("\n✓ Step 2 complete!")
+    print("="*70)
+
+    return results
+
+
+# ============================================================================
+# STEP 3: Z-AXIS ROTATION
+# ============================================================================
+
+def step3_rotation_z(step1_results, step2_results, data_dir):
+    """
+    Step 3: Z-axis rotation alignment (in-plane XY rotation) + Y-axis re-alignment.
+
+    Step 3: Uses ECC-style correlation with aggressive denoising to find rotation angle.
+    Step 3.1: Re-aligns Y-axis on central B-scan after rotation using NCC search.
+
+    Args:
+        step1_results: Dictionary from step1_xz_alignment
+        step2_results: Dictionary from step2_y_alignment
+        data_dir: Path to data directory for saving results
+
+    Returns:
+        Dictionary with rotation results including:
+        - rotation_angle: Optimal rotation angle (degrees)
+        - rotation_correlation: Correlation score at optimal rotation
+        - y_shift_correction: Y-axis correction after rotation (pixels)
+        - y_shift_ncc: NCC score for Y-shift
+        - ncc_before/ncc_final: Overall alignment quality
+        - overlap_v1_rotated: Final aligned volume
+    """
+    if not ROTATION_AVAILABLE:
+        print("\n⚠️  Rotation module not available. Skipping Step 3.")
+        return None
+
+    print("\n" + "="*70)
+    print("STEP 3: ROTATION ALIGNMENT + Y-AXIS RE-ALIGNMENT")
+    print("="*70)
+    print("  Step 3:   Rotates around Z-axis → Layer structure alignment (ECC correlation)")
+    print("  Step 3.1: Re-aligns Y-axis on central B-scan (NCC search)")
+    print("="*70)
+
+    overlap_v0 = step1_results['overlap_v0']
+    overlap_v1_y_aligned = step2_results['overlap_v1_y_aligned']
+
+    # Calculate NCC before rotation
+    print("\n1. Calculating baseline NCC (before rotation)...")
+    ncc_before = calculate_ncc_3d(overlap_v0, overlap_v1_y_aligned)
+    print(f"  Baseline NCC: {ncc_before:.4f}")
+
+    # Find optimal rotation angle
+    print("\n2. Finding optimal rotation angle...")
+    rotation_angle, rotation_metrics = find_optimal_rotation_z(
+        overlap_v0,
+        overlap_v1_y_aligned,
+        coarse_range=10,
+        coarse_step=1,
+        fine_range=3,
+        fine_step=0.5,
+        verbose=True,
+        visualize_masks=True,
+        mask_vis_path=data_dir / 'step3_mask_verification.png'
+    )
+
+    correlation_optimal = rotation_metrics['optimal_correlation']
+
+    # Apply rotation
+    print(f"\n3. Applying rotation: {rotation_angle:+.2f}°...")
+    overlap_v1_rotated = apply_rotation_z(
+        overlap_v1_y_aligned,
+        rotation_angle,
+        axes=(0, 1)
+    )
+
+    # Step 3.1: Y-axis re-alignment on central B-scan (fine-tuning)
+    print(f"\n3.1. Y-axis fine-tuning after rotation...")
+    y_shift_correction, y_shift_ncc, y_shift_results = find_optimal_y_shift_central_bscan(
+        overlap_v0,
+        overlap_v1_rotated,
+        search_range=20,
+        step=1,
+        verbose=True
+    )
+
+    # Apply Y-shift correction if significant
+    if abs(y_shift_correction) > 0.5:
+        print(f"\n  Applying Y correction: {y_shift_correction:+.1f} px")
+        overlap_v1_rotated = ndimage.shift(
+            overlap_v1_rotated,
+            shift=(y_shift_correction, 0, 0),
+            order=1,
+            mode='constant',
+            cval=0
+        )
+    else:
+        print(f"\n  No significant Y correction needed ({y_shift_correction:+.1f} px < 0.5 px threshold)")
+
+    # Verify final NCC
+    print(f"\n4. Final verification...")
+    ncc_final = calculate_ncc_3d(overlap_v0, overlap_v1_rotated)
+    print(f"  Final NCC: {ncc_final:.4f}")
+
+    # Calculate overall improvement
+    improvement = (ncc_final - ncc_before) * 100
+    print(f"\n  Overall NCC improvement: {ncc_before:.4f} → {ncc_final:.4f} ({improvement:+.2f}%)")
+    print(f"  Optimal rotation: {rotation_angle:+.2f}°")
+    print(f"  Correlation at optimal: {correlation_optimal:.4f}")
+    print(f"  Y-shift fine-tuning: {y_shift_correction:+.1f} px (NCC={y_shift_ncc:.4f})")
+
+    results = {
+        # Rotation (Step 3)
+        'rotation_angle': float(rotation_angle),
+        'rotation_correlation': float(correlation_optimal),
+        'coarse_results': rotation_metrics['coarse_results'],
+        'fine_results': rotation_metrics['fine_results'],
+        # Y-shift correction (Step 3.1)
+        'y_shift_correction': float(y_shift_correction),
+        'y_shift_ncc': float(y_shift_ncc),
+        'y_shift_results': y_shift_results,
+        # NCC metrics
+        'ncc_before': float(ncc_before),
+        'ncc_final': float(ncc_final),
+        'ncc_improvement_percent': float(improvement),
+        # Final volume
+        'overlap_v1_rotated': overlap_v1_rotated
+    }
+
+    print("\n✓ Step 3 complete (including Step 3.1 Y-axis re-alignment)!")
     print("="*70)
 
     return results
@@ -505,6 +651,44 @@ def visualize_step2(step1_results, step2_results, data_dir):
     plt.close()
 
 
+def visualize_step3(step1_results, step2_results, step3_results, data_dir):
+    """Visualize Z-axis rotation alignment."""
+    if not ROTATION_AVAILABLE:
+        print("\n⚠️  Rotation visualization not available.")
+        return
+
+    print("\nCreating Step 3 visualizations...")
+
+    overlap_v0 = step1_results['overlap_v0']
+    overlap_v1_y_aligned = step2_results['overlap_v1_y_aligned']
+    overlap_v1_rotated = step3_results['overlap_v1_rotated']
+
+    rotation_angle = step3_results['rotation_angle']
+    ncc_before = step3_results['ncc_before']
+    ncc_final = step3_results['ncc_final']
+    y_shift_correction = step3_results.get('y_shift_correction', 0.0)
+
+    # Rotation search plot
+    visualize_rotation_search(
+        step3_results['coarse_results'],
+        step3_results['fine_results'],
+        output_path=data_dir / 'step3_rotation_search.png'
+    )
+
+    # Before/after comparison
+    visualize_rotation_comparison(
+        overlap_v0,
+        overlap_v1_y_aligned,
+        overlap_v1_rotated,
+        rotation_angle,
+        ncc_before,
+        ncc_final,
+        output_path=data_dir / 'step3_rotation_comparison.png'
+    )
+
+    print("✓ Step 3 visualizations complete!")
+
+
 # ============================================================================
 # SURFACE VISUALIZATION
 # ============================================================================
@@ -662,27 +846,28 @@ Examples:
   # Run specific step
   python alignment_pipeline.py --step 1
   python alignment_pipeline.py --step 2
+  python alignment_pipeline.py --step 3
 
   # Run multiple steps
-  python alignment_pipeline.py --steps 1 2
+  python alignment_pipeline.py --steps 1 2 3
 
-  # Run all steps
+  # Run all steps (XZ, Y, Rotation)
   python alignment_pipeline.py --all
 
   # Run all steps with 3D visualization
   python alignment_pipeline.py --all --visual
         """
     )
-    parser.add_argument('--step', type=int, help='Run specific step (1, 2, etc)')
+    parser.add_argument('--step', type=int, help='Run specific step (1=XZ, 2=Y, 3=Rotation)')
     parser.add_argument('--steps', type=int, nargs='+', help='Run multiple steps')
-    parser.add_argument('--all', action='store_true', help='Run all steps')
-    parser.add_argument('--visual', action='store_true', help='Generate 3D visualizations (requires both steps 1 and 2)')
+    parser.add_argument('--all', action='store_true', help='Run all steps (1+2+3)')
+    parser.add_argument('--visual', action='store_true', help='Generate 3D visualizations after alignment')
 
     args = parser.parse_args()
 
     # Determine which steps to run
     if args.all:
-        steps_to_run = [1, 2]
+        steps_to_run = [1, 2, 3]
     elif args.steps:
         steps_to_run = sorted(args.steps)
     elif args.step:
@@ -701,34 +886,70 @@ Examples:
     data_dir = Path(__file__).parent.parent / 'notebooks' / 'data'
     oct_data_dir = Path(__file__).parent.parent / 'oct_data'
 
-    processor = OCTImageProcessor(sidebar_width=250, crop_top=100, crop_bottom=50)
-    loader = OCTVolumeLoader(processor)
-
-    # Load volumes
-    print("\nLoading volumes...")
-    bmp_dirs = []
-    for bmp_file in oct_data_dir.rglob('*.bmp'):
-        vol_dir = bmp_file.parent
-        if vol_dir not in bmp_dirs:
-            bmp_dirs.append(vol_dir)
-
-    f001_vols = sorted([v for v in bmp_dirs if 'F001_IP' in str(v)])
-
-    if len(f001_vols) < 2:
-        raise ValueError("Need at least 2 F001 volumes")
-
-    print(f"  Volume 0: {f001_vols[0].name}")
-    print(f"  Volume 1: {f001_vols[1].name}")
-
-    volume_0 = loader.load_volume_from_directory(str(f001_vols[0]))
-    volume_1 = loader.load_volume_from_directory(str(f001_vols[1]))
-
-    print(f"  V0 shape: {volume_0.shape}")
-    print(f"  V1 shape: {volume_1.shape}")
-
     # Storage for results
     step1_results = None
     step2_results = None
+    step3_results = None
+
+    # Check for existing results
+    step1_path = data_dir / 'step1_results.npy'
+    step2_path = data_dir / 'step2_results.npy'
+    step3_path = data_dir / 'step3_results.npy'
+
+    # Determine which steps need volumes to be loaded
+    need_volumes = False
+    if 1 in steps_to_run:
+        need_volumes = True
+    elif (2 in steps_to_run or 3 in steps_to_run) and not step1_path.exists():
+        # Need step 1 results but they don't exist
+        print("\n⚠️  Step 1 results not found. Will run Step 1 first.")
+        steps_to_run = [1] + [s for s in steps_to_run if s != 1]
+        need_volumes = True
+    elif args.visual:
+        # Visualization requires original volumes
+        need_volumes = True
+
+    # Try to load existing results if not running those steps
+    if 1 not in steps_to_run and step1_path.exists():
+        print(f"\n✓ Loading existing Step 1 results from {step1_path.name}")
+        step1_results = np.load(step1_path, allow_pickle=True).item()
+
+    if 2 not in steps_to_run and step2_path.exists():
+        print(f"✓ Loading existing Step 2 results from {step2_path.name}")
+        step2_results = np.load(step2_path, allow_pickle=True).item()
+
+    if 3 not in steps_to_run and step3_path.exists():
+        print(f"✓ Loading existing Step 3 results from {step3_path.name}")
+        step3_results = np.load(step3_path, allow_pickle=True).item()
+
+    # Load volumes only if needed
+    volume_0 = None
+    volume_1 = None
+
+    if need_volumes:
+        processor = OCTImageProcessor(sidebar_width=250, crop_top=100, crop_bottom=50)
+        loader = OCTVolumeLoader(processor)
+
+        print("\nLoading volumes...")
+        bmp_dirs = []
+        for bmp_file in oct_data_dir.rglob('*.bmp'):
+            vol_dir = bmp_file.parent
+            if vol_dir not in bmp_dirs:
+                bmp_dirs.append(vol_dir)
+
+        f001_vols = sorted([v for v in bmp_dirs if 'F001_IP' in str(v)])
+
+        if len(f001_vols) < 2:
+            raise ValueError("Need at least 2 F001 volumes")
+
+        print(f"  Volume 0: {f001_vols[0].name}")
+        print(f"  Volume 1: {f001_vols[1].name}")
+
+        volume_0 = loader.load_volume_from_directory(str(f001_vols[0]))
+        volume_1 = loader.load_volume_from_directory(str(f001_vols[1]))
+
+        print(f"  V0 shape: {volume_0.shape}")
+        print(f"  V1 shape: {volume_1.shape}")
 
     # Execute steps
     for step_num in steps_to_run:
@@ -761,6 +982,25 @@ Examples:
             combined_results = {**step1_results, **step2_results}
             np.save(data_dir / 'step2_results.npy', combined_results, allow_pickle=True)
 
+        elif step_num == 3:
+            # Load step1 and step2 if not already done
+            if step1_results is None:
+                print("\nLoading Step 1 results...")
+                step1_results = np.load(data_dir / 'step1_results.npy', allow_pickle=True).item()
+
+            if step2_results is None:
+                print("\nLoading Step 2 results...")
+                step2_results = np.load(data_dir / 'step2_results.npy', allow_pickle=True).item()
+
+            step3_results = step3_rotation_z(step1_results, step2_results, data_dir)
+
+            if step3_results is not None:
+                visualize_step3(step1_results, step2_results, step3_results, data_dir)
+
+                # Save
+                combined_results = {**step1_results, **step2_results, **step3_results}
+                np.save(data_dir / 'step3_results.npy', combined_results, allow_pickle=True)
+
         else:
             print(f"\n⚠️  Step {step_num} not implemented yet")
 
@@ -773,10 +1013,31 @@ Examples:
     if step2_results:
         print(f"Step 2 (Y): ΔY={step2_results['y_shift']:+.2f}")
         print(f"  Centers: V0={step2_results['center_y_v0']:.2f}, V1={step2_results['center_y_v1']:.2f}")
+    if step3_results:
+        print(f"Step 3 (Rotation): θ={step3_results['rotation_angle']:+.2f}° (NCC: {step3_results['ncc_before']:.4f}→{step3_results['ncc_final']:.4f})")
 
     # Generate 3D visualizations if requested
     if args.visual:
         if step1_results and step2_results:
+            # Use rotated volume if available, otherwise Y-aligned
+            if step3_results:
+                print("\nℹ️  Using Step 3 (rotated) volume for 3D visualization")
+                # Apply rotation to full volume for merging
+                volume_1_xz_aligned = step1_results['volume_1_xz_aligned']
+                y_shift = step2_results['y_shift']
+                rotation_angle = step3_results['rotation_angle']
+
+                # Apply Y shift + rotation to full volume
+                volume_1_aligned = ndimage.shift(
+                    volume_1_xz_aligned, shift=(y_shift, 0, 0),
+                    order=1, mode='constant', cval=0
+                )
+                volume_1_aligned = apply_rotation_z(volume_1_aligned, rotation_angle, axes=(0, 1))
+
+                # Update step2_results for visualization
+                step2_results_with_rotation = step2_results.copy()
+                step2_results_with_rotation['y_shift'] = y_shift
+
             generate_3d_visualizations(volume_0, step1_results, step2_results, data_dir)
         else:
             print("\n⚠️  Cannot generate 3D visualizations: Both steps 1 and 2 must be run")

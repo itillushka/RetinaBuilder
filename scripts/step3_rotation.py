@@ -112,7 +112,9 @@ def main():
         coarse_step=args.coarse_step,
         fine_range=args.fine_range,
         fine_step=args.fine_step,
-        verbose=True
+        verbose=True,
+        visualize_masks=True,
+        mask_vis_path=data_dir / 'step3_mask_verification.png'
     )
 
     ncc_after = rotation_metrics['optimal_ncc']
@@ -126,7 +128,7 @@ def main():
     overlap_v1_rotated = apply_rotation_z(
         overlap_v1_y_aligned,
         rotation_angle,
-        axes=(1, 2)
+        axes=(0, 1)
     )
 
     # Verify

@@ -43,16 +43,18 @@ class OCTImageProcessor:
     Removes unwanted elements like sidebars and black regions.
     """
 
-    def __init__(self, sidebar_width: int = 250, crop_top: int = 50):
+    def __init__(self, sidebar_width: int = 250, crop_top: int = 100, crop_bottom: int = 50):
         """
         Initialize the image processor.
 
         Args:
             sidebar_width: Width of sidebar to remove from LEFT side (pixels)
-            crop_top: Number of pixels to crop from top (remove black areas)
+            crop_top: Number of pixels to crop from top (remove text/numbers)
+            crop_bottom: Number of pixels to crop from bottom (remove text/numbers)
         """
         self.sidebar_width = sidebar_width
         self.crop_top = crop_top
+        self.crop_bottom = crop_bottom
 
     def load_image(self, file_path: str) -> Optional[np.ndarray]:
         """
@@ -77,9 +79,13 @@ class OCTImageProcessor:
             if img_array.shape[1] > self.sidebar_width:
                 img_array = img_array[:, self.sidebar_width:]
 
-            # Crop top to remove black areas
+            # Crop top to remove text/numbers
             if img_array.shape[0] > self.crop_top:
                 img_array = img_array[self.crop_top:, :]
+
+            # Crop bottom to remove text/numbers
+            if img_array.shape[0] > self.crop_bottom:
+                img_array = img_array[:-self.crop_bottom, :]
 
             return img_array.astype(np.float32)
 
@@ -381,7 +387,8 @@ def main():
     parser = argparse.ArgumentParser(description='OCT Volumetric Viewer with PyVista')
     parser.add_argument('--data-dir', required=True, help='Directory containing BMP files')
     parser.add_argument('--sidebar-width', type=int, default=250, help='Sidebar width to remove (left side)')
-    parser.add_argument('--crop-top', type=int, default=50, help='Pixels to crop from top')
+    parser.add_argument('--crop-top', type=int, default=100, help='Pixels to crop from top')
+    parser.add_argument('--crop-bottom', type=int, default=50, help='Pixels to crop from bottom')
     parser.add_argument('--scan-area', type=float, default=6.0, help='Physical scan area in mm (default: 6mm)')
     parser.add_argument('--mode', choices=['volume', 'slices', 'surface', 'all'], default='volume',
                        help='Visualization mode')
@@ -391,10 +398,10 @@ def main():
 
     print(f"Loading OCT volume from: {args.data_dir}")
     print(f"Physical scan area: {args.scan_area}mm × {args.scan_area}mm")
-    print(f"Processing: sidebar={args.sidebar_width}px (left), crop_top={args.crop_top}px")
+    print(f"Processing: sidebar={args.sidebar_width}px (left), crop_top={args.crop_top}px, crop_bottom={args.crop_bottom}px")
 
     # Initialize components
-    processor = OCTImageProcessor(sidebar_width=args.sidebar_width, crop_top=args.crop_top)
+    processor = OCTImageProcessor(sidebar_width=args.sidebar_width, crop_top=args.crop_top, crop_bottom=args.crop_bottom)
     loader = OCTVolumeLoader(processor)
 
     # Load volume

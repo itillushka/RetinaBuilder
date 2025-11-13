@@ -44,6 +44,10 @@ def main():
     if 'y_offsets_interpolated' in step3_results:
         print(f"  ✓ Step 4: Windowed Y-alignment ({len(step3_results['y_offsets_interpolated'])} B-scans)")
 
+    if 'ncc_after_bspline' in step3_results:
+        print(f"  ✓ Step 5: B-spline FFD (NCC: {step3_results['ncc_after_bspline']:.4f})")
+        print(f"    Note: Step 5 applied to overlap region; visualization uses Step 4 for full volume")
+
     # Load volumes
     print("\n2. Loading volumes...")
     processor = OCTImageProcessor(sidebar_width=250, crop_top=100, crop_bottom=50)

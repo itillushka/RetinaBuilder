@@ -1565,6 +1565,431 @@ def visualize_windowed_offsets(y_offsets, sampled_offsets, sampled_positions,
     print(f"  ✓ Saved: {output_path.name}")
 
 
+# ============================================================================
+# STEP 5: B-SPLINE FREE-FORM DEFORMATION (NON-RIGID REGISTRATION)
+# ============================================================================
+
+def calculate_registration_metrics(fixed, moving, registered, deformation_field=None):
+    """
+    Calculate quality metrics for registration.
+
+    Parameters:
+    -----------
+    fixed : np.ndarray
+        Reference volume
+    moving : np.ndarray
+        Original moving volume
+    registered : np.ndarray
+        Registered moving volume
+    deformation_field : np.ndarray, optional
+        Deformation field (Y, X, Z, 3) if available
+
+    Returns:
+    --------
+    metrics : dict
+        Registration quality metrics
+    """
+    from scipy.stats import pearsonr
+
+    # NCC before and after
+    ncc_before = pearsonr(fixed.ravel(), moving.ravel())[0]
+    ncc_after = pearsonr(fixed.ravel(), registered.ravel())[0]
+
+    metrics = {
+        'ncc_before': float(ncc_before),
+        'ncc_after': float(ncc_after),
+        'ncc_improvement_percent': float((ncc_after - ncc_before) * 100)
+    }
+
+    # Deformation statistics if available
+    if deformation_field is not None:
+        displacements = np.linalg.norm(deformation_field, axis=-1)  # Magnitude at each voxel
+        metrics.update({
+            'mean_displacement': float(np.mean(displacements)),
+            'max_displacement': float(np.max(displacements)),
+            'std_displacement': float(np.std(displacements))
+        })
+
+    return metrics
+
+
+def bspline_registration_oct(
+    fixed_volume: np.ndarray,
+    moving_volume: np.ndarray,
+    grid_spacing: tuple = (32, 32, 32),
+    max_iterations: int = 500,
+    num_resolutions: int = 4,
+    bending_weight: float = 0.1,
+    verbose: bool = True
+):
+    """
+    Perform B-spline FFD registration on OCT volumes using ITK-Elastix.
+
+    This implements non-rigid registration to handle retinal layer curvature
+    that cannot be corrected with rigid transformations.
+
+    Parameters:
+    -----------
+    fixed_volume : np.ndarray
+        Reference volume (Y, X, Z) shape
+    moving_volume : np.ndarray
+        Volume to align (same shape as fixed)
+    grid_spacing : tuple
+        Control point spacing in voxels (Y, X, Z)
+        - (64, 64, 64): Coarse global curvature (~10s)
+        - (32, 32, 32): Recommended for layer alignment (~30s)
+        - (16, 16, 16): Fine alignment (~2 min)
+    max_iterations : int
+        Maximum optimizer iterations per resolution
+    num_resolutions : int
+        Number of pyramid levels (4 = 8x→4x→2x→1x)
+    bending_weight : float
+        Regularization weight (higher = smoother)
+        - 0.01-0.1: Flexible deformation
+        - 0.5-1.0: Conservative, prevents overfitting
+    verbose : bool
+        Print registration progress
+
+    Returns:
+    --------
+    registered_volume : np.ndarray
+        Aligned moving volume
+    deformation_field : np.ndarray
+        Dense displacement field (Y, X, Z, 3)
+    metrics : dict
+        Registration quality metrics
+    """
+    try:
+        import itk
+    except ImportError:
+        raise ImportError(
+            "ITK-Elastix not installed. Install with: pip install itk-elastix"
+        )
+
+    if verbose:
+        print("="*70)
+        print("B-SPLINE FREE-FORM DEFORMATION REGISTRATION")
+        print("="*70)
+        print(f"Fixed volume shape:  {fixed_volume.shape}")
+        print(f"Moving volume shape: {moving_volume.shape}")
+        print(f"Grid spacing:        {grid_spacing}")
+        print(f"Resolutions:         {num_resolutions}")
+        print(f"Bending weight:      {bending_weight}")
+
+    # Validate inputs
+    if fixed_volume.shape != moving_volume.shape:
+        raise ValueError(f"Volume shape mismatch: fixed={fixed_volume.shape}, moving={moving_volume.shape}")
+
+    if np.isnan(fixed_volume).any() or np.isnan(moving_volume).any():
+        raise ValueError("Input volumes contain NaN values")
+
+    if np.all(fixed_volume == 0) or np.all(moving_volume == 0):
+        raise ValueError("Input volumes are all zeros")
+
+    # Convert NumPy arrays to ITK images
+    if verbose:
+        print("\n  Converting NumPy arrays to ITK images...")
+
+    try:
+        fixed_image = itk.image_from_array(fixed_volume.astype(np.float32))
+        moving_image = itk.image_from_array(moving_volume.astype(np.float32))
+    except Exception as e:
+        raise RuntimeError(f"Failed to convert NumPy arrays to ITK images: {e}")
+
+    # Create parameter map
+    parameter_object = itk.ParameterObject.New()
+    bspline_map = parameter_object.GetDefaultParameterMap('bspline')
+
+    # Configure B-spline parameters
+    bspline_map['MaximumNumberOfIterations'] = [str(max_iterations)]
+    bspline_map['FinalGridSpacingInPhysicalUnits'] = [
+        str(float(grid_spacing[0])),
+        str(float(grid_spacing[1])),
+        str(float(grid_spacing[2]))
+    ]
+
+    # Similarity metric: NCC + bending energy penalty
+    bspline_map['Metric'] = ['AdvancedNormalizedCorrelation', 'TransformBendingEnergyPenalty']
+    bspline_map['Metric0Weight'] = ['1.0']
+    bspline_map['Metric1Weight'] = [str(bending_weight)]
+
+    # Multi-resolution pyramid
+    bspline_map['NumberOfResolutions'] = [str(num_resolutions)]
+    schedule = []
+    for i in range(num_resolutions):
+        factor = 2 ** (num_resolutions - 1 - i)
+        schedule.extend([str(factor)] * 3)  # Y, X, Z
+    bspline_map['ImagePyramidSchedule'] = schedule
+
+    # Optimizer settings
+    bspline_map['Optimizer'] = ['AdaptiveStochasticGradientDescent']
+    bspline_map['AutomaticTransformInitialization'] = ['false']
+    bspline_map['AutomaticScalesEstimation'] = ['true']
+
+    # Output settings
+    bspline_map['WriteResultImage'] = ['false']
+    bspline_map['ResultImageFormat'] = ['npy']
+
+    parameter_object.AddParameterMap(bspline_map)
+
+    # Run registration
+    if verbose:
+        print("\nRunning Elastix registration...")
+        print("  (This may take 30-60 seconds depending on volume size)")
+
+    try:
+        result_image, result_transform_parameters = itk.elastix_registration_method(
+            fixed_image, moving_image,
+            parameter_object=parameter_object,
+            log_to_console=False  # Suppress verbose ITK output
+        )
+    except Exception as e:
+        raise RuntimeError(f"Elastix registration failed: {e}")
+
+    if result_image is None:
+        raise RuntimeError("Elastix returned None for result_image")
+
+    # Apply transformation using transformix (more reliable on Windows than direct conversion)
+    if verbose:
+        print("  Applying transformation with transformix...")
+
+    try:
+        # Use transformix to apply the transformation - this is more reliable
+        result_image_transformix = itk.transformix_filter(
+            moving_image,
+            result_transform_parameters
+        )
+    except Exception as e:
+        raise RuntimeError(f"Transformix failed to apply transformation: {e}")
+
+    # Convert result back to NumPy using transformix output
+    if verbose:
+        print("  Converting result to NumPy array...")
+
+    try:
+        # Try GetArrayFromImage first (most reliable for transformix output)
+        registered_volume = itk.GetArrayFromImage(result_image_transformix)
+
+        # Ensure it's a proper numpy array
+        if not isinstance(registered_volume, np.ndarray):
+            registered_volume = np.asarray(registered_volume)
+
+        if verbose:
+            print(f"    Successfully converted: {registered_volume.shape}, dtype={registered_volume.dtype}")
+
+    except Exception as e:
+        if verbose:
+            print(f"    GetArrayFromImage failed: {e}")
+
+        # Fallback: try array_from_image
+        try:
+            registered_volume = itk.array_from_image(result_image_transformix)
+            if not isinstance(registered_volume, np.ndarray):
+                registered_volume = np.asarray(registered_volume)
+            if verbose:
+                print(f"    array_from_image succeeded: {registered_volume.shape}")
+        except Exception as e2:
+            raise RuntimeError(f"Failed to convert transformix result to NumPy: {e2}")
+
+    if registered_volume is None:
+        raise RuntimeError("Converted registered volume is None")
+
+    if not isinstance(registered_volume, np.ndarray):
+        raise RuntimeError(f"Conversion resulted in wrong type: {type(registered_volume)}")
+
+    if registered_volume.size == 0 or len(registered_volume.shape) == 0:
+        raise RuntimeError(f"Converted registered volume is empty or scalar: shape={registered_volume.shape}")
+
+    # Validate shape
+    if verbose:
+        print(f"  Validating shapes...")
+        print(f"    Fixed:      {fixed_volume.shape}")
+        print(f"    Moving:     {moving_volume.shape}")
+        print(f"    Registered: {registered_volume.shape}")
+
+    if registered_volume.shape != fixed_volume.shape:
+        # Try to crop/pad to match
+        if verbose:
+            print(f"    Warning: Shape mismatch, attempting to match shapes...")
+
+        # Get minimum shape along each axis
+        min_shape = tuple(min(s1, s2) for s1, s2 in zip(registered_volume.shape, fixed_volume.shape))
+
+        # Crop both to minimum shape
+        registered_volume = registered_volume[:min_shape[0], :min_shape[1], :min_shape[2]]
+        fixed_volume_cropped = fixed_volume[:min_shape[0], :min_shape[1], :min_shape[2]]
+        moving_volume_cropped = moving_volume[:min_shape[0], :min_shape[1], :min_shape[2]]
+
+        if verbose:
+            print(f"    Cropped to: {registered_volume.shape}")
+    else:
+        fixed_volume_cropped = fixed_volume
+        moving_volume_cropped = moving_volume
+
+    # Extract deformation field
+    if verbose:
+        print("  Computing deformation field...")
+
+    transform_parameter_object = itk.ParameterObject.New()
+    transform_parameter_object.AddParameterMap(result_transform_parameters.GetParameterMap(0))
+
+    try:
+        deformation_field_image = itk.transformix_deformation_field(
+            fixed_image, transform_parameter_object
+        )
+    except Exception as e:
+        raise RuntimeError(f"Failed to compute deformation field: {e}")
+
+    if deformation_field_image is None:
+        raise RuntimeError("Transformix returned None for deformation field")
+
+    # Convert deformation field to NumPy
+    try:
+        # Method 1: GetArrayViewFromImage
+        deformation_field = itk.GetArrayViewFromImage(deformation_field_image)
+        deformation_field = np.array(deformation_field, copy=True)
+        if verbose:
+            print(f"    Deformation field converted: {deformation_field.shape}")
+    except Exception as e:
+        if verbose:
+            print(f"    Deformation Method 1 failed: {e}")
+        try:
+            # Method 2: GetArrayFromImage
+            deformation_field = itk.GetArrayFromImage(deformation_field_image)
+            if verbose:
+                print(f"    Deformation Method 2 succeeded: {deformation_field.shape}")
+        except Exception as e2:
+            if verbose:
+                print(f"    Deformation Method 2 failed: {e2}")
+            try:
+                # Method 3: array_view_from_image
+                deformation_field = np.asarray(itk.array_view_from_image(deformation_field_image))
+                if verbose:
+                    print(f"    Deformation Method 3 succeeded: {deformation_field.shape}")
+            except Exception as e3:
+                raise RuntimeError(f"Failed to convert deformation field: {e3}")
+
+    if deformation_field is None:
+        raise RuntimeError("Converted deformation field is None")
+
+    if not isinstance(deformation_field, np.ndarray):
+        raise RuntimeError(f"Deformation field conversion resulted in wrong type: {type(deformation_field)}")
+
+    if deformation_field.size == 0 or len(deformation_field.shape) == 0:
+        raise RuntimeError(f"Converted deformation field is empty or scalar: shape={deformation_field.shape}")
+
+    # Calculate metrics using cropped volumes
+    metrics = calculate_registration_metrics(
+        fixed_volume_cropped, moving_volume_cropped, registered_volume, deformation_field
+    )
+
+    if verbose:
+        print("\n" + "="*70)
+        print("REGISTRATION COMPLETE")
+        print("="*70)
+        print(f"NCC before:  {metrics['ncc_before']:.4f}")
+        print(f"NCC after:   {metrics['ncc_after']:.4f}")
+        print(f"Improvement: {metrics['ncc_improvement_percent']:+.2f}%")
+        print(f"Mean deformation: {metrics['mean_displacement']:.2f} voxels")
+        print(f"Max deformation:  {metrics['max_displacement']:.2f} voxels")
+
+    return registered_volume, deformation_field, metrics
+
+
+def visualize_deformation_field(deformation_field, output_path, slice_z=None):
+    """
+    Visualize B-spline deformation field.
+
+    Creates a 4-panel plot showing:
+    1. Y-displacement (depth direction)
+    2. X-displacement (A-scan direction)
+    3. Displacement magnitude
+    4. Quiver plot of deformation vectors
+
+    Parameters:
+    -----------
+    deformation_field : np.ndarray
+        Shape (Y, X, Z, 3) - displacement vectors
+    output_path : Path
+        Where to save visualization
+    slice_z : int or None
+        Z-slice to visualize (default: middle slice)
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib import cm
+
+    Y, X, Z, _ = deformation_field.shape
+
+    if slice_z is None:
+        slice_z = Z // 2
+
+    # Extract Y and X displacements at slice
+    dy = deformation_field[:, :, slice_z, 0]
+    dx = deformation_field[:, :, slice_z, 1]
+
+    # Calculate magnitude
+    magnitude = np.sqrt(dy**2 + dx**2)
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 14))
+
+    # Y-displacement
+    im0 = axes[0, 0].imshow(dy, cmap='RdBu_r', vmin=-20, vmax=20)
+    axes[0, 0].set_title(f'Y-displacement (B-scan {slice_z})', fontsize=14, fontweight='bold')
+    axes[0, 0].set_xlabel('X (A-scans)', fontsize=11)
+    axes[0, 0].set_ylabel('Y (depth)', fontsize=11)
+    plt.colorbar(im0, ax=axes[0, 0], label='Pixels')
+
+    # X-displacement
+    im1 = axes[0, 1].imshow(dx, cmap='RdBu_r', vmin=-20, vmax=20)
+    axes[0, 1].set_title(f'X-displacement (B-scan {slice_z})', fontsize=14, fontweight='bold')
+    axes[0, 1].set_xlabel('X (A-scans)', fontsize=11)
+    axes[0, 1].set_ylabel('Y (depth)', fontsize=11)
+    plt.colorbar(im1, ax=axes[0, 1], label='Pixels')
+
+    # Magnitude
+    im2 = axes[1, 0].imshow(magnitude, cmap='hot', vmin=0, vmax=30)
+    axes[1, 0].set_title(f'Displacement magnitude (B-scan {slice_z})', fontsize=14, fontweight='bold')
+    axes[1, 0].set_xlabel('X (A-scans)', fontsize=11)
+    axes[1, 0].set_ylabel('Y (depth)', fontsize=11)
+    plt.colorbar(im2, ax=axes[1, 0], label='Pixels')
+
+    # Quiver plot (subsampled for clarity)
+    step = 32
+    Y_grid, X_grid = np.meshgrid(
+        np.arange(0, Y, step),
+        np.arange(0, X, step),
+        indexing='ij'
+    )
+    dy_sub = dy[::step, ::step]
+    dx_sub = dx[::step, ::step]
+
+    axes[1, 1].quiver(
+        X_grid, Y_grid, dx_sub, dy_sub, magnitude[::step, ::step],
+        cmap='hot', scale=200, width=0.003
+    )
+    axes[1, 1].set_title(f'Deformation vectors (B-scan {slice_z})', fontsize=14, fontweight='bold')
+    axes[1, 1].set_xlabel('X (A-scans)', fontsize=11)
+    axes[1, 1].set_ylabel('Y (depth)', fontsize=11)
+    axes[1, 1].invert_yaxis()
+
+    # Add statistics text box
+    stats_text = (
+        f"Statistics (entire volume):\n"
+        f"Mean displacement: {np.mean(np.linalg.norm(deformation_field, axis=-1)):.2f}px\n"
+        f"Max displacement:  {np.max(np.linalg.norm(deformation_field, axis=-1)):.2f}px\n"
+        f"Std displacement:  {np.std(np.linalg.norm(deformation_field, axis=-1)):.2f}px"
+    )
+    fig.text(0.99, 0.01, stats_text, ha='right', va='bottom',
+             fontsize=10, family='monospace',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+    print(f"  ✓ Saved: {output_path.name}")
+
+
 if __name__ == "__main__":
     print("Rotation Alignment Module")
     print("=" * 70)

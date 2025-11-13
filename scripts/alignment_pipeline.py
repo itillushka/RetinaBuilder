@@ -656,6 +656,155 @@ def step4_windowed_y_alignment(step1_results, step3_results, data_dir):
     return results
 
 
+def step5_bspline_registration(step1_results, step4_results, data_dir, save_checkpoint=True):
+    """
+    Step 5: B-spline Free-Form Deformation non-rigid registration.
+
+    Applies B-spline FFD to handle retinal layer curvature that cannot
+    be corrected with rigid transformations or windowed Y-alignment.
+
+    Args:
+        step1_results: Dictionary from step1_xz_alignment
+        step4_results: Dictionary from step4_windowed_y_alignment
+        data_dir: Path to data directory for saving results
+        save_checkpoint: Whether to save checkpoint before running (default True)
+
+    Returns:
+        Dictionary with B-spline registration results including:
+        - overlap_v1_bspline: Volume with B-spline registration applied
+        - deformation_field: Dense displacement field (Y, X, Z, 3)
+        - ncc_before/ncc_after: Alignment quality metrics
+        - mean/max/std_displacement: Deformation statistics
+    """
+    if not ROTATION_AVAILABLE:
+        print("\n⚠️  Rotation module not available. Skipping Step 5.")
+        return None
+
+    print("\n" + "="*70)
+    print("STEP 5: B-SPLINE NON-RIGID REGISTRATION")
+    print("="*70)
+    print("  Method: Free-Form Deformation with ITK-Elastix")
+    print("  Grid spacing: 32×32×32 voxels")
+    print("  Bending weight: 0.1 (flexible deformation)")
+    print("="*70)
+
+    # Extract volumes
+    overlap_v0 = step1_results['overlap_v0']
+    overlap_v1_windowed = step4_results['overlap_v1_final']
+
+    # Save checkpoint before Step 5 for quick testing (only when running full pipeline)
+    if save_checkpoint:
+        checkpoint_path = data_dir / 'step4_checkpoint.npz'
+        print("\n  Saving Step 4 checkpoint (for quick Step 5 testing)...")
+        np.savez_compressed(
+            checkpoint_path,
+            overlap_v0=overlap_v0,
+            overlap_v1_windowed=overlap_v1_windowed,
+            ncc_step4=step4_results['ncc_after_windowed'],
+            ncc_before=step1_results.get('ncc_before', step4_results['ncc_after_windowed'])
+        )
+        print(f"  ✓ Checkpoint saved: {checkpoint_path.name}")
+
+    # Check if ITK-Elastix is available
+    try:
+        import itk
+    except ImportError:
+        print("\n⚠️  ITK-Elastix not installed. Skipping Step 5.")
+        print("   Install with: pip install itk-elastix")
+        return None
+
+    # Quick validation test (fails in seconds, not minutes)
+    print("\n1. Validating inputs...")
+    if overlap_v0.shape != overlap_v1_windowed.shape:
+        print(f"   ✗ Shape mismatch: {overlap_v0.shape} vs {overlap_v1_windowed.shape}")
+        return None
+    if np.isnan(overlap_v0).any() or np.isnan(overlap_v1_windowed).any():
+        print("   ✗ Volumes contain NaN values")
+        return None
+    if np.all(overlap_v0 == 0) or np.all(overlap_v1_windowed == 0):
+        print("   ✗ Volumes are all zeros")
+        return None
+
+    print(f"   ✓ Volumes valid: {overlap_v0.shape}, dtype={overlap_v0.dtype}")
+
+    # Quick ITK conversion test
+    print("   Testing ITK conversion...")
+    try:
+        test_img = itk.image_from_array(overlap_v0[:10, :10, :10].astype(np.float32))
+        test_arr = np.array(itk.array_view_from_image(test_img))
+        if test_arr.shape != (10, 10, 10):
+            print(f"   ✗ ITK conversion test failed: got shape {test_arr.shape}")
+            return None
+        print("   ✓ ITK conversion test passed")
+    except Exception as e:
+        print(f"   ✗ ITK test failed: {e}")
+        return None
+
+    # Import B-spline functions
+    from rotation_alignment import bspline_registration_oct, visualize_deformation_field
+
+    # Apply B-spline registration
+    print("\n2. Running B-spline registration...")
+    print("   This may take 30-60 seconds depending on volume size...")
+
+    registered_volume, deformation_field, metrics = bspline_registration_oct(
+        fixed_volume=overlap_v0,
+        moving_volume=overlap_v1_windowed,
+        grid_spacing=(32, 32, 32),
+        max_iterations=500,
+        num_resolutions=4,
+        bending_weight=0.1,
+        verbose=True
+    )
+
+    # Calculate improvement over Step 4
+    ncc_step4 = step4_results['ncc_after_windowed']
+    improvement_over_step4 = (metrics['ncc_after'] - ncc_step4) * 100
+
+    print(f"\n3. Improvement analysis:")
+    print(f"   Step 4 NCC:     {ncc_step4:.4f}")
+    print(f"   Step 5 NCC:     {metrics['ncc_after']:.4f}")
+    print(f"   Improvement:    {improvement_over_step4:+.2f}%")
+
+    # Calculate total improvement from Step 3 baseline
+    ncc_step3_baseline = step4_results.get('ncc_before_windowed', step4_results['ncc_after_windowed'])
+    if 'ncc_before' in step1_results:
+        ncc_step3_baseline = step1_results['ncc_before']
+    total_improvement = (metrics['ncc_after'] - ncc_step3_baseline) * 100
+    print(f"   Total (Steps 3-5): {ncc_step3_baseline:.4f} → {metrics['ncc_after']:.4f} ({total_improvement:+.2f}%)")
+
+    # Visualize deformation field
+    print("\n4. Creating deformation field visualization...")
+    visualize_deformation_field(
+        deformation_field,
+        output_path=data_dir / 'step5_bspline_deformation.png',
+        slice_z=None  # Middle slice
+    )
+
+    # Save deformation field for later analysis
+    print("\n5. Saving deformation field...")
+    np.save(data_dir / 'step5_deformation_field.npy', deformation_field)
+    print(f"   ✓ Saved: step5_deformation_field.npy ({deformation_field.shape})")
+
+    results = {
+        'overlap_v1_bspline': registered_volume,
+        'deformation_field': deformation_field,
+        'ncc_before_bspline': metrics['ncc_before'],
+        'ncc_after_bspline': metrics['ncc_after'],
+        'ncc_improvement_bspline_percent': metrics['ncc_improvement_percent'],
+        'ncc_improvement_over_step4_percent': float(improvement_over_step4),
+        'ncc_total_improvement_percent': float(total_improvement),
+        'mean_displacement': metrics['mean_displacement'],
+        'max_displacement': metrics['max_displacement'],
+        'std_displacement': metrics['std_displacement']
+    }
+
+    print("\n✓ Step 5 complete (B-spline non-rigid registration)!")
+    print("="*70)
+
+    return results
+
+
 # ============================================================================
 # VISUALIZATION
 # ============================================================================
@@ -1079,9 +1228,56 @@ Examples:
     parser.add_argument('--step', type=int, help='Run specific step (1=XZ, 2=Y, 3=Rotation)')
     parser.add_argument('--steps', type=int, nargs='+', help='Run multiple steps')
     parser.add_argument('--all', action='store_true', help='Run all steps (1+2+3)')
+    parser.add_argument('--step5-only', action='store_true', help='Run only Step 5 (B-spline) from checkpoint')
     parser.add_argument('--visual', action='store_true', help='Generate 3D visualizations after alignment')
 
     args = parser.parse_args()
+
+    # Setup
+    data_dir = Path(__file__).parent.parent / 'notebooks' / 'data'
+    oct_data_dir = Path(__file__).parent.parent / 'oct_data'
+
+    # Handle Step 5 only mode
+    if args.step5_only:
+        print("="*70)
+        print("OCT VOLUME ALIGNMENT PIPELINE - STEP 5 ONLY MODE")
+        print("="*70)
+        print("Loading Step 4 checkpoint for quick Step 5 testing...")
+
+        checkpoint_path = data_dir / 'step4_checkpoint.npz'
+        if not checkpoint_path.exists():
+            print(f"\n❌ Error: Checkpoint not found at {checkpoint_path}")
+            print("   Run the full pipeline first with: python alignment_pipeline.py --steps 1 2 3")
+            return
+
+        print(f"  ✓ Loading checkpoint: {checkpoint_path.name}")
+        checkpoint = np.load(checkpoint_path)
+
+        # Create minimal step1_results and step4_results
+        step1_results = {
+            'overlap_v0': checkpoint['overlap_v0'],
+            'ncc_before': float(checkpoint['ncc_before'])
+        }
+        step4_results = {
+            'overlap_v1_final': checkpoint['overlap_v1_windowed'],
+            'ncc_after_windowed': float(checkpoint['ncc_step4']),
+            'ncc_before_windowed': float(checkpoint['ncc_before'])
+        }
+
+        print(f"  ✓ Loaded overlap volumes: {checkpoint['overlap_v0'].shape}")
+        print(f"  ✓ Step 4 NCC: {checkpoint['ncc_step4']:.4f}")
+
+        # Run Step 5 only (don't save checkpoint again)
+        step5_results = step5_bspline_registration(step1_results, step4_results, data_dir, save_checkpoint=False)
+
+        if step5_results is not None:
+            print("\n" + "="*70)
+            print("STEP 5 COMPLETE")
+            print("="*70)
+            print(f"NCC improvement over Step 4: {step5_results['ncc_improvement_over_step4_percent']:+.2f}%")
+            print(f"Total improvement: {step5_results['ncc_total_improvement_percent']:+.2f}%")
+
+        return
 
     # Determine which steps to run
     if args.all:
@@ -1091,7 +1287,7 @@ Examples:
     elif args.step:
         steps_to_run = [args.step]
     else:
-        print("Error: Must specify --step, --steps, or --all")
+        print("Error: Must specify --step, --steps, --all, or --step5-only")
         parser.print_help()
         return
 
@@ -1099,10 +1295,6 @@ Examples:
     print("OCT VOLUME ALIGNMENT PIPELINE")
     print("="*70)
     print(f"Steps to run: {steps_to_run}")
-
-    # Setup
-    data_dir = Path(__file__).parent.parent / 'notebooks' / 'data'
-    oct_data_dir = Path(__file__).parent.parent / 'oct_data'
 
     # Storage for results
     step1_results = None
@@ -1230,7 +1422,14 @@ Examples:
                         # Merge Step 4 results into step3_results
                         step3_results = {**step3_results, **step4_results}
 
-                # Save (includes Steps 3, 3.5, and 4 results)
+                        # Step 5: B-spline non-rigid registration
+                        step5_results = step5_bspline_registration(step1_results, step4_results, data_dir)
+
+                        if step5_results is not None:
+                            # Merge Step 5 results into step3_results
+                            step3_results = {**step3_results, **step5_results}
+
+                # Save (includes Steps 3, 3.5, 4, and 5 results)
                 combined_results = {**step1_results, **step2_results, **step3_results}
                 np.save(data_dir / 'step3_results.npy', combined_results, allow_pickle=True)
 
@@ -1252,7 +1451,13 @@ Examples:
             print(f"Step 3.5 (X-rotation): θX={step3_results['rotation_angle_x']:+.2f}° (NCC: {step3_results['ncc_before_x']:.4f}→{step3_results['ncc_after_x']:.4f})")
         if 'ncc_after_windowed' in step3_results:
             print(f"Step 4 (Windowed Y): Sampled {len(step3_results['sampled_positions'])} positions, window=20 (NCC: {step3_results['ncc_before_windowed']:.4f}→{step3_results['ncc_after_windowed']:.4f})")
-            print(f"  Total improvement (Steps 3+3.5+4): {step3_results['ncc_before']:.4f}→{step3_results['ncc_after_windowed']:.4f} ({step3_results['ncc_total_improvement_percent']:+.2f}%)")
+            if 'ncc_after_bspline' not in step3_results:
+                print(f"  Total improvement (Steps 3+3.5+4): {step3_results['ncc_before']:.4f}→{step3_results['ncc_after_windowed']:.4f} ({step3_results['ncc_total_improvement_percent']:+.2f}%)")
+        if 'ncc_after_bspline' in step3_results:
+            print(f"Step 5 (B-spline FFD): Grid=32³, Bending=0.1 (NCC: {step3_results['ncc_before_bspline']:.4f}→{step3_results['ncc_after_bspline']:.4f})")
+            print(f"  Improvement over Step 4: {step3_results['ncc_improvement_over_step4_percent']:+.2f}%")
+            print(f"  Deformation: mean={step3_results['mean_displacement']:.2f}px, max={step3_results['max_displacement']:.2f}px")
+            print(f"  Total improvement (Steps 3+3.5+4+5): {step3_results['ncc_before']:.4f}→{step3_results['ncc_after_bspline']:.4f} ({step3_results['ncc_total_improvement_percent']:+.2f}%)")
 
     # Generate 3D visualizations if requested
     if args.visual:
@@ -1306,6 +1511,13 @@ Examples:
                         y_offsets_full,
                         verbose=False
                     )
+
+                # Note: Step 5 (B-spline) operates on overlap region only for metrics
+                # For full volume visualization, Step 4 windowed alignment is sufficient
+                # B-spline deformation on full volume would be very slow (~2-3 minutes)
+                if 'ncc_after_bspline' in step3_results:
+                    print("  ℹ️  Step 5 B-spline applied to overlap region (see metrics)")
+                    print("     Full volume uses Step 4 windowed alignment for visualization")
 
             # Pass the fully aligned volume (with all transformations) to visualization
             # If volume_1_aligned is None, the function will reconstruct it with just Y-shift

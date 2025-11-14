@@ -43,11 +43,11 @@ def preprocess_oct_for_rotation(img, mask=None):
     and zeroing out low-intensity regions.
 
     Pipeline:
-      1. Non-local means denoising (h=12)
-      2. Bilateral filtering (sigma=90)
-      3. Median filter (kernel=7)
-      4. Otsu thresholding (80% threshold - keeps only bright tissue)
-      5. CLAHE contrast enhancement
+      1. Non-local means denoising (h=25) - HARSH
+      2. Bilateral filtering (sigma=150) - HARSH
+      3. Median filter (kernel=15) - HARSH
+      4. Otsu thresholding (50% threshold - preserves tissue layers)
+      5. CLAHE contrast enhancement (clipLimit=3.0)
       6. Horizontal kernel filter (emphasizes layer structures)
 
     Args:
@@ -60,24 +60,24 @@ def preprocess_oct_for_rotation(img, mask=None):
     # Normalize to 0-255 first
     img_norm = ((img - img.min()) / (img.max() - img.min() + 1e-8) * 255).astype(np.uint8)
 
-    # Step 1: Non-local means denoising (very effective for OCT speckle)
-    denoised1 = cv2.fastNlMeansDenoising(img_norm, h=12, templateWindowSize=7, searchWindowSize=21)
+    # Step 1: Non-local means denoising (HARSH - very effective for OCT speckle)
+    denoised1 = cv2.fastNlMeansDenoising(img_norm, h=25, templateWindowSize=7, searchWindowSize=21)
 
-    # Step 2: Bilateral filtering for edge-preserving smoothing
-    denoised2 = cv2.bilateralFilter(denoised1, d=9, sigmaColor=90, sigmaSpace=90)
+    # Step 2: Bilateral filtering for edge-preserving smoothing (HARSH)
+    denoised2 = cv2.bilateralFilter(denoised1, d=11, sigmaColor=150, sigmaSpace=150)
 
-    # Step 3: Median filter to remove remaining noise
-    denoised3 = cv2.medianBlur(denoised2, 7)
+    # Step 3: Median filter to remove remaining noise (HARSH)
+    denoised3 = cv2.medianBlur(denoised2, 15)
 
-    # Step 4: Threshold to keep only tissue layers (zero out noise/background)
+    # Step 4: Threshold to keep only tissue layers (50% of Otsu - preserves layers)
     thresh_val = cv2.threshold(denoised3, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[0]
-    thresh_val = int(thresh_val * 0.8)  # 80% of Otsu threshold (conservative)
+    thresh_val = int(thresh_val * 0.5)  # 50% of Otsu threshold (preserves tissue layers)
 
     thresholded = denoised3.copy()
     thresholded[denoised3 < thresh_val] = 0
 
     # Step 5: Enhance contrast (CLAHE)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
     enhanced = clahe.apply(thresholded)
 
     # Step 6: Emphasize horizontal structures (retinal layers)
@@ -91,6 +91,78 @@ def preprocess_oct_for_rotation(img, mask=None):
         layer_enhanced = layer_enhanced.astype(np.uint8)
 
     return layer_enhanced
+
+
+def preprocess_oct_for_visualization(img):
+    """
+    Preprocess OCT B-scan for VISUALIZATION ONLY (no horizontal kernel filter).
+
+    Same as preprocess_oct_for_rotation() but WITHOUT the horizontal kernel filter
+    that can make images appear dark in matplotlib displays.
+
+    Args:
+        img: Input B-scan (2D array)
+
+    Returns:
+        Preprocessed uint8 image
+    """
+    # Normalize to 0-255 first
+    img_norm = ((img - img.min()) / (img.max() - img.min() + 1e-8) * 255).astype(np.uint8)
+
+    # Step 1: Non-local means denoising (HARSH)
+    denoised = cv2.fastNlMeansDenoising(img_norm, h=25, templateWindowSize=7, searchWindowSize=21)
+
+    # Step 2: Bilateral filtering (HARSH)
+    denoised = cv2.bilateralFilter(denoised, d=11, sigmaColor=150, sigmaSpace=150)
+
+    # Step 3: Median filter (HARSH)
+    denoised = cv2.medianBlur(denoised, 15)
+
+    # Step 4: Threshold (50% of Otsu - preserves layers)
+    thresh_val = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[0]
+    thresh_val = int(thresh_val * 0.5)
+    denoised[denoised < thresh_val] = 0
+
+    # Step 5: CLAHE contrast enhancement
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    denoised = clahe.apply(denoised)
+
+    # NO Step 6 horizontal kernel - it makes images appear dark for visualization
+
+    return denoised
+
+
+def detect_contour_surface(bscan_denoised):
+    """
+    Detect retinal surface using contour method (finds where tissue STARTS).
+
+    This method works perfectly on denoised B-scans by finding the first
+    white pixel (top boundary) in each column.
+
+    Args:
+        bscan_denoised: Preprocessed B-scan (2D array, uint8, already denoised)
+
+    Returns:
+        surface: 1D array (X,) with Y positions of detected surface
+    """
+    Y, X = bscan_denoised.shape
+    surface = np.zeros(X)
+
+    # Simple threshold (70th percentile works well on denoised images)
+    threshold = np.percentile(bscan_denoised, 70)
+    _, binary = cv2.threshold(bscan_denoised, threshold, 255, cv2.THRESH_BINARY)
+
+    # For each column, find first white pixel (top boundary = tissue start)
+    for x in range(X):
+        column = binary[:, x]
+        white_pixels = np.where(column > 0)[0]
+        if len(white_pixels) > 0:
+            surface[x] = white_pixels[0]  # First from top
+        else:
+            # No tissue detected - use previous column or default
+            surface[x] = surface[x-1] if x > 0 else Y // 4
+
+    return surface
 
 
 # ============================================================================
@@ -1019,20 +1091,23 @@ def find_optimal_y_shift_central_bscan(overlap_v0, overlap_v1_rotated,
     Step 3.1: Find optimal Y-axis shift on central B-scan after rotation.
 
     After rotation in Step 3, the Y-axis (depth) alignment may be disturbed.
-    This function re-aligns along Y-axis using NCC-based search on the
-    central B-scan to maximize similarity.
+    This function re-aligns along Y-axis using CONTOUR-BASED surface detection
+    on the central B-scan - much faster and more robust than NCC search.
+
+    METHOD: Detects retinal surface on both B-scans using contour detection,
+    then calculates the median difference to find optimal Y-shift.
 
     Args:
         overlap_v0: Reference overlap volume (Y, X, Z)
         overlap_v1_rotated: Rotated volume from Step 3 (Y, X, Z)
-        search_range: Search range in pixels (±range)
-        step: Step size for search (default: 1 pixel)
+        search_range: Unused (kept for compatibility)
+        step: Unused (kept for compatibility)
         verbose: Print progress
 
     Returns:
         best_shift: Optimal Y shift correction (pixels)
-        best_ncc: NCC score at optimal shift
-        results: List of dicts with all tested shifts and their scores
+        best_ncc: NCC score at optimal shift (calculated for verification)
+        results: List with single result dict
     """
     # Extract central B-scan
     z_center = overlap_v0.shape[2] // 2
@@ -1041,75 +1116,253 @@ def find_optimal_y_shift_central_bscan(overlap_v0, overlap_v1_rotated,
 
     if verbose:
         print(f"\n{'='*70}")
-        print(f"STEP 3.1: Y-AXIS RE-ALIGNMENT (CENTRAL B-SCAN)")
+        print(f"STEP 3.1: Y-AXIS RE-ALIGNMENT (CONTOUR-BASED)")
         print(f"{'='*70}")
-        print(f"  Correcting vertical shift after rotation")
+        print(f"  Method: Surface detection (contour) - direct geometric alignment")
         print(f"  Using central B-scan: Z={z_center}/{overlap_v0.shape[2]}")
-        print(f"  Search range: ±{search_range} pixels")
-        print(f"  Step size: {step} pixel(s)")
 
-    # Calculate tissue threshold (50th percentile = median)
-    threshold = calculate_tissue_threshold(bscan_v0, bscan_v1, percentile=50)
+    # Apply harsh denoising to both B-scans (same as Steps 3 & 3.5)
+    # Use two versions: one for alignment (with horizontal filter), one for visualization (without)
+    if verbose:
+        print(f"  Applying harsh denoising to B-scans...")
+
+    # For alignment: use full preprocessing with horizontal kernel filter
+    bscan_v0_denoised_align = preprocess_oct_for_rotation(bscan_v0)
+    bscan_v1_denoised_align = preprocess_oct_for_rotation(bscan_v1)
+
+    # For visualization: use preprocessing WITHOUT horizontal kernel filter (prevents dark images)
+    bscan_v0_denoised_vis = preprocess_oct_for_visualization(bscan_v0)
+    bscan_v1_denoised_vis = preprocess_oct_for_visualization(bscan_v1)
+
+    # Detect surfaces using contour method (on alignment-version images)
+    if verbose:
+        print(f"  Detecting retinal surfaces...")
+    surface_v0 = detect_contour_surface(bscan_v0_denoised_align)  # (X,) array
+    surface_v1 = detect_contour_surface(bscan_v1_denoised_align)  # (X,) array
+
+    # Calculate surface difference (V0 - V1)
+    diff = surface_v0 - surface_v1
+
+    # Filter out outliers (use robust median instead of mean)
+    valid = ~np.isnan(diff) & (np.abs(diff) < 100)  # Remove extreme outliers
+
+    if valid.sum() > 10:
+        # Median is robust to outliers
+        y_shift = np.median(diff[valid])
+        std_diff = np.std(diff[valid])
+        confidence = valid.sum() / len(diff)
+    else:
+        y_shift = 0.0
+        std_diff = 0.0
+        confidence = 0.0
 
     if verbose:
-        print(f"  Tissue threshold: {threshold:.1f}")
+        print(f"\n  ✓ Surface detection complete!")
+        print(f"    Surface difference: {y_shift:+.2f} ± {std_diff:.2f} px")
+        print(f"    Valid pixels: {valid.sum()}/{len(diff)} ({confidence:.1%})")
 
-    # Search Y shifts
-    y_shifts = np.arange(-search_range, search_range + step, step)
-    results = []
-    best_shift = 0
-    best_ncc = -1.0
+    # Verify with NCC at the detected shift (use alignment-version for NCC calculation)
+    if verbose:
+        print(f"  Verifying alignment quality with NCC...")
+
+    bscan_shifted = ndimage.shift(
+        bscan_v1_denoised_align, shift=(y_shift, 0),
+        order=1, mode='constant', cval=0
+    )
+
+    threshold = calculate_tissue_threshold(bscan_v0_denoised_align, bscan_v1_denoised_align, percentile=50)
+    mask = (bscan_v0_denoised_align > threshold) & (bscan_shifted > threshold)
+
+    if mask.sum() > 100:
+        ncc_score = calculate_ncc(bscan_v0_denoised_align, bscan_shifted, mask=mask)
+    else:
+        ncc_score = -1.0
 
     if verbose:
-        print(f"  Testing {len(y_shifts)} Y-shifts...")
+        print(f"    NCC at detected shift: {ncc_score:.4f}")
 
-    for i, y_shift in enumerate(y_shifts):
-        # Shift B-scan along Y-axis
-        bscan_shifted = ndimage.shift(
-            bscan_v1, shift=(y_shift, 0),
-            order=1, mode='constant', cval=0
-        )
-
-        # Create tissue mask (compare only valid tissue regions)
-        mask = (bscan_v0 > threshold) & (bscan_shifted > threshold)
-
-        # Calculate NCC on tissue regions only
-        if mask.sum() > 100:  # Need at least 100 pixels
-            ncc = calculate_ncc(bscan_v0, bscan_shifted, mask=mask)
+        if abs(y_shift) < 0.5:
+            print(f"    → No significant correction needed ({y_shift:+.2f} px < 0.5 px threshold)")
         else:
-            ncc = -1.0
+            print(f"    → Will apply correction: {y_shift:+.2f} px")
 
-        results.append({
-            'y_shift': float(y_shift),
-            'ncc': ncc,
-            'valid_pixels': int(mask.sum())
-        })
+    # Return in same format as old function for compatibility, with extra data for visualization
+    results = [{
+        'y_shift': float(y_shift),
+        'ncc': ncc_score,
+        'std_diff': float(std_diff),
+        'confidence': float(confidence),
+        'valid_pixels': int(valid.sum()),
+        # Extra data for visualization (use visualization-friendly denoised images)
+        'bscan_v0': bscan_v0,
+        'bscan_v1': bscan_v1,
+        'bscan_v0_denoised': bscan_v0_denoised_vis,  # WITHOUT horizontal kernel
+        'bscan_v1_denoised': bscan_v1_denoised_vis,  # WITHOUT horizontal kernel
+        'surface_v0': surface_v0,
+        'surface_v1': surface_v1
+    }]
 
-        # Track best
-        if ncc > best_ncc:
-            best_ncc = ncc
-            best_shift = float(y_shift)
-
-        # Progress indicator
-        if verbose and (i + 1) % 10 == 0:
-            print(f"    Progress: {i + 1}/{len(y_shifts)} shifts tested... (current best: {best_shift:+.1f} px @ NCC={best_ncc:.4f})")
-
-    if verbose:
-        print(f"\n  ✓ Y-shift search complete!")
-        print(f"    Optimal Y shift: {best_shift:+.1f} px")
-        print(f"    NCC at optimal shift: {best_ncc:.4f}")
-
-        if abs(best_shift) < 0.5:
-            print(f"    → No significant correction needed")
-        else:
-            print(f"    → Will apply correction: {best_shift:+.1f} px")
-
-    return best_shift, best_ncc, results
+    return float(y_shift), ncc_score, results
 
 
 # ============================================================================
 # VISUALIZATION FUNCTIONS
 # ============================================================================
+
+def visualize_contour_y_alignment(bscan_v0, bscan_v1,
+                                   bscan_v0_denoised, bscan_v1_denoised,
+                                   surface_v0, surface_v1, y_shift,
+                                   ncc_score, confidence, output_path=None):
+    """
+    Visualize Step 3.1 contour-based Y-axis alignment.
+
+    Shows:
+    - Original and denoised B-scans
+    - Detected surface contours
+    - Surface difference plot
+    - Before/after alignment comparison
+
+    Args:
+        bscan_v0: Original reference B-scan (Y, X)
+        bscan_v1: Original B-scan to align (Y, X)
+        bscan_v0_denoised: Denoised reference B-scan (Y, X)
+        bscan_v1_denoised: Denoised B-scan to align (Y, X)
+        surface_v0: Detected surface on V0 (X,)
+        surface_v1: Detected surface on V1 (X,)
+        y_shift: Calculated Y-shift correction (pixels)
+        ncc_score: NCC score at optimal shift
+        confidence: Detection confidence (0-1)
+        output_path: Where to save the figure
+    """
+    import matplotlib.pyplot as plt
+
+    Y, X = bscan_v0.shape
+
+    fig = plt.figure(figsize=(20, 12))
+    gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.3)
+
+    # Row 1: Original B-scans
+    ax1 = fig.add_subplot(gs[0, 0])
+    ax1.imshow(bscan_v0, cmap='gray', aspect='auto')
+    ax1.set_title('Volume 0 - Original B-scan (Central)', fontsize=11, fontweight='bold')
+    ax1.set_xlabel('X (A-scans)')
+    ax1.set_ylabel('Y (depth)')
+
+    ax2 = fig.add_subplot(gs[0, 1])
+    ax2.imshow(bscan_v1, cmap='gray', aspect='auto')
+    ax2.set_title('Volume 1 - Original B-scan (Central)', fontsize=11, fontweight='bold')
+    ax2.set_xlabel('X (A-scans)')
+    ax2.set_ylabel('Y (depth)')
+
+    # Row 1, Col 3: Alignment metrics
+    ax3 = fig.add_subplot(gs[0, 2])
+    ax3.axis('off')
+    metrics_text = f"""
+    STEP 3.1: CONTOUR-BASED Y-ALIGNMENT
+
+    Method: Surface Detection
+
+    Results:
+    • Y-shift: {y_shift:+.2f} px
+    • NCC score: {ncc_score:.4f}
+    • Confidence: {confidence:.1%}
+
+    Interpretation:
+    {'→ Significant shift detected' if abs(y_shift) >= 0.5 else '→ No significant shift'}
+    {'→ High quality alignment' if ncc_score > 0.75 else '→ Moderate alignment quality'}
+    """
+    ax3.text(0.1, 0.5, metrics_text, fontsize=10, family='monospace',
+             verticalalignment='center', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+
+    # Row 2: Denoised B-scans with detected surfaces
+    # (denoised images are already uint8 0-255 from preprocess_oct_for_rotation)
+    ax4 = fig.add_subplot(gs[1, 0])
+    ax4.imshow(bscan_v0_denoised, cmap='gray', aspect='auto')
+    ax4.plot(surface_v0, 'r-', linewidth=4, label='Detected Surface')
+    ax4.set_title('V0 - Denoised (Single B-scan) + Surface', fontsize=11, fontweight='bold')
+    ax4.set_xlabel('X (A-scans)')
+    ax4.set_ylabel('Y (depth)')
+    ax4.legend(loc='upper right')
+    ax4.set_ylim([0, Y // 2])
+
+    ax5 = fig.add_subplot(gs[1, 1])
+    ax5.imshow(bscan_v1_denoised, cmap='gray', aspect='auto')
+    ax5.plot(surface_v1, 'b-', linewidth=4, label='Detected Surface')
+    ax5.set_title('V1 - Denoised (Single B-scan) + Surface', fontsize=11, fontweight='bold')
+    ax5.set_xlabel('X (A-scans)')
+    ax5.set_ylabel('Y (depth)')
+    ax5.legend(loc='upper right')
+    ax5.set_ylim([0, Y // 2])
+
+    # Row 2, Col 3: Surface difference
+    ax6 = fig.add_subplot(gs[1, 2])
+    diff = surface_v0 - surface_v1
+    valid = ~np.isnan(diff) & (np.abs(diff) < 100)
+    x_coords = np.arange(X)
+    ax6.plot(x_coords[valid], diff[valid], 'k-', linewidth=1, alpha=0.5, label='Raw difference')
+    ax6.axhline(y_shift, color='red', linestyle='--', linewidth=2, label=f'Median shift: {y_shift:+.2f} px')
+    ax6.axhline(0, color='gray', linestyle='-', linewidth=1)
+    ax6.fill_between(x_coords, y_shift - np.std(diff[valid]), y_shift + np.std(diff[valid]),
+                      alpha=0.3, color='red', label=f'±1 std: {np.std(diff[valid]):.2f} px')
+    ax6.set_title('Surface Difference (V0 - V1)', fontsize=11, fontweight='bold')
+    ax6.set_xlabel('X (A-scans)')
+    ax6.set_ylabel('Y difference (pixels)')
+    ax6.legend(loc='best', fontsize=9)
+    ax6.grid(alpha=0.3)
+
+    # Row 3: Surface overlay (before alignment)
+    ax7 = fig.add_subplot(gs[2, 0])
+    ax7.imshow(bscan_v0_denoised, cmap='gray', aspect='auto', alpha=0.7)
+    ax7.plot(surface_v0, 'r-', linewidth=4, label='V0 surface')
+    ax7.plot(surface_v1, 'b-', linewidth=4, label='V1 surface', alpha=0.8)
+    ax7.fill_between(np.arange(X), surface_v0, surface_v1,
+                      alpha=0.3, color='yellow', label='Misalignment')
+    ax7.set_title('BEFORE: Surface Overlay (Single B-scan)', fontsize=11, fontweight='bold')
+    ax7.set_xlabel('X (A-scans)')
+    ax7.set_ylabel('Y (depth)')
+    ax7.legend(loc='upper right')
+    ax7.set_ylim([0, Y // 2])
+
+    # Row 3: Surface overlay (after alignment)
+    ax8 = fig.add_subplot(gs[2, 1])
+    surface_v1_corrected = surface_v1 + y_shift
+    ax8.imshow(bscan_v0_denoised, cmap='gray', aspect='auto', alpha=0.7)
+    ax8.plot(surface_v0, 'r-', linewidth=4, label='V0 surface')
+    ax8.plot(surface_v1_corrected, 'b-', linewidth=4, label='V1 surface (corrected)', alpha=0.8)
+    ax8.fill_between(np.arange(X), surface_v0, surface_v1_corrected,
+                      alpha=0.3, color='green', label='Residual misalignment')
+    ax8.set_title(f'AFTER: Surface Overlay (Y-shift: {y_shift:+.2f} px)', fontsize=11, fontweight='bold')
+    ax8.set_xlabel('X (A-scans)')
+    ax8.set_ylabel('Y (depth)')
+    ax8.legend(loc='upper right')
+    ax8.set_ylim([0, Y // 2])
+
+    # Row 3, Col 3: Residual error after correction
+    ax9 = fig.add_subplot(gs[2, 2])
+    residual = surface_v0 - surface_v1_corrected
+    valid_res = ~np.isnan(residual) & (np.abs(residual) < 50)
+    ax9.hist(residual[valid_res], bins=50, color='green', alpha=0.7, edgecolor='black')
+    ax9.axvline(np.median(residual[valid_res]), color='red', linestyle='--',
+                linewidth=2, label=f'Median: {np.median(residual[valid_res]):.2f} px')
+    ax9.axvline(0, color='gray', linestyle='-', linewidth=1)
+    ax9.set_title('Residual Error After Correction', fontsize=11, fontweight='bold')
+    ax9.set_xlabel('Residual difference (pixels)')
+    ax9.set_ylabel('Frequency')
+    ax9.legend(loc='upper right')
+    ax9.grid(alpha=0.3, axis='y')
+
+    fig.suptitle('Step 3.1: Contour-Based Y-Axis Re-alignment (Central B-scan)',
+                 fontsize=14, fontweight='bold')
+
+    plt.tight_layout()
+
+    if output_path:
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        print(f"  Saved visualization: {output_path}")
+        plt.close()
+    else:
+        plt.show()
+
 
 def visualize_masking(overlap_v0, overlap_v1, mask_v0, mask_v1, mask_combined, output_path=None):
     """
@@ -1165,21 +1418,22 @@ def visualize_masking(overlap_v0, overlap_v1, mask_v0, mask_v1, mask_combined, o
     ax3.set_xlabel('X (lateral)')
 
     # Row 2: Masks (en-face view)
+    # Convert boolean masks to float for proper visualization (white=included, black=excluded)
     ax4 = plt.subplot(4, 3, 4)
-    ax4.imshow(mask_v0_mip.T, cmap='gray', origin='lower', aspect='auto')
+    ax4.imshow(mask_v0_mip.T.astype(float), cmap='gray', origin='lower', aspect='auto', vmin=0, vmax=1)
     valid_v0 = mask_v0.sum()
     ax4.set_title(f'V0 Mask\n{valid_v0:,} voxels ({valid_v0/mask_v0.size*100:.1f}%)', fontweight='bold')
     ax4.set_ylabel('Z (B-scans)')
     ax4.set_xlabel('X (lateral)')
 
     ax5 = plt.subplot(4, 3, 5)
-    ax5.imshow(mask_v1_mip.T, cmap='gray', origin='lower', aspect='auto')
+    ax5.imshow(mask_v1_mip.T.astype(float), cmap='gray', origin='lower', aspect='auto', vmin=0, vmax=1)
     valid_v1 = mask_v1.sum()
     ax5.set_title(f'V1 Mask\n{valid_v1:,} voxels ({valid_v1/mask_v1.size*100:.1f}%)', fontweight='bold')
     ax5.set_xlabel('X (lateral)')
 
     ax6 = plt.subplot(4, 3, 6)
-    ax6.imshow(mask_combined_mip.T, cmap='hot', origin='lower', aspect='auto')
+    ax6.imshow(mask_combined_mip.T.astype(float), cmap='hot', origin='lower', aspect='auto', vmin=0, vmax=1)
     valid_combined = mask_combined.sum()
     ax6.set_title(f'Combined Mask (V0 & V1)\n{valid_combined:,} voxels ({valid_combined/mask_combined.size*100:.1f}%)',
                   fontweight='bold', color='red')
@@ -1333,9 +1587,14 @@ def visualize_rotation_comparison(overlap_v0, overlap_v1_before, overlap_v1_afte
 
     # Get central B-scan
     z_center = overlap_v0.shape[2] // 2
-    bscan_v0 = overlap_v0[:, :, z_center]
-    bscan_v1_before = overlap_v1_before[:, :, z_center]
-    bscan_v1_after = overlap_v1_after[:, :, z_center]
+    bscan_v0_raw = overlap_v0[:, :, z_center]
+    bscan_v1_before_raw = overlap_v1_before[:, :, z_center]
+    bscan_v1_after_raw = overlap_v1_after[:, :, z_center]
+
+    # Denoise B-scans for visualization (without horizontal kernel filter)
+    bscan_v0 = preprocess_oct_for_visualization(bscan_v0_raw)
+    bscan_v1_before = preprocess_oct_for_visualization(bscan_v1_before_raw)
+    bscan_v1_after = preprocess_oct_for_visualization(bscan_v1_after_raw)
 
     # Row 1: En-face MIPs - BEFORE
     ax1 = plt.subplot(2, 4, 1)
@@ -1354,11 +1613,11 @@ def visualize_rotation_comparison(overlap_v0, overlap_v1_before, overlap_v1_afte
     ax3.set_title(f'Overlay BEFORE\nNCC={ncc_before:.4f}', fontweight='bold')
     ax3.set_xlabel('X')
 
-    # B-scan before
+    # B-scan before (denoised)
     ax4 = plt.subplot(2, 4, 4)
     ax4.imshow(bscan_v0, cmap='Reds', alpha=0.5, aspect='auto')
     ax4.imshow(bscan_v1_before, cmap='Greens', alpha=0.5, aspect='auto')
-    ax4.set_title(f'B-scan BEFORE (Z={z_center})', fontweight='bold')
+    ax4.set_title(f'Denoised B-scan BEFORE (Z={z_center})', fontweight='bold')
     ax4.set_xlabel('X'); ax4.set_ylabel('Y')
 
     # Row 2: En-face MIPs - AFTER
@@ -1379,11 +1638,11 @@ def visualize_rotation_comparison(overlap_v0, overlap_v1_before, overlap_v1_afte
                   fontweight='bold')
     ax7.set_xlabel('X')
 
-    # B-scan after
+    # B-scan after (denoised)
     ax8 = plt.subplot(2, 4, 8)
     ax8.imshow(bscan_v0, cmap='Reds', alpha=0.5, aspect='auto')
     ax8.imshow(bscan_v1_after, cmap='Greens', alpha=0.5, aspect='auto')
-    ax8.set_title(f'B-scan AFTER (Z={z_center})', fontweight='bold')
+    ax8.set_title(f'Denoised B-scan AFTER (Z={z_center})', fontweight='bold')
     ax8.set_xlabel('X'); ax8.set_ylabel('Y')
 
     plt.suptitle(f'Z-Axis Rotation: {angle:+.2f}° (ECC-optimized) + Y-shift Correction | NCC Verification: {ncc_before:.4f} → {ncc_after:.4f}',
@@ -1403,7 +1662,7 @@ def visualize_rotation_comparison(overlap_v0, overlap_v1_before, overlap_v1_afte
 
 def calculate_windowed_y_offsets(overlap_v0, overlap_v1,
                                   window_size=20,
-                                  outlier_threshold=50,
+                                  outlier_threshold=100,
                                   verbose=True):
     """
     Calculate Y-offsets using windowed sampling with interpolation.
@@ -1415,7 +1674,7 @@ def calculate_windowed_y_offsets(overlap_v0, overlap_v1,
         overlap_v0: Reference volume (Y, X, Z)
         overlap_v1: Volume to align (Y, X, Z)
         window_size: Sample every N B-scans (default: 20)
-        outlier_threshold: Reject offsets > this value (pixels)
+        outlier_threshold: Reject offsets > this value (pixels, default: 100)
         verbose: Print progress
 
     Returns:
@@ -1423,6 +1682,10 @@ def calculate_windowed_y_offsets(overlap_v0, overlap_v1,
         sampled_offsets: (n_samples,) array of calculated Y-offsets at sampled positions
         sampled_positions: (n_samples,) array of Z-indices where samples were taken
         confidences: (n_samples,) array of confidence scores
+
+    Note:
+        Increased outlier_threshold from 50 to 100 to handle larger residual Y-offsets
+        after rotation steps. This prevents valid data from being rejected as outliers.
     """
     from scipy.interpolate import CubicSpline
     from surface_visualization import load_or_detect_surface
@@ -1437,12 +1700,12 @@ def calculate_windowed_y_offsets(overlap_v0, overlap_v1,
         print(f"\n  Sampling {n_samples} B-scans with window size {window_size}")
         print(f"  Sampled positions: {list(sampled_positions)}")
 
-    # Detect surfaces once for entire volume
+    # Detect surfaces ONLY at sampled positions (performance optimization)
     if verbose:
-        print(f"  Detecting surfaces...")
+        print(f"  Detecting surfaces at {n_samples} sampled B-scans (with harsh denoising)...")
 
-    surface_v0 = load_or_detect_surface(overlap_v0, method='peak')  # (X, Z)
-    surface_v1 = load_or_detect_surface(overlap_v1, method='peak')
+    surface_v0 = load_or_detect_surface(overlap_v0, method='peak', sampled_positions=sampled_positions)  # (X, n_samples)
+    surface_v1 = load_or_detect_surface(overlap_v1, method='peak', sampled_positions=sampled_positions)
 
     # Calculate Y-offset at each sampled position
     sampled_offsets = np.zeros(n_samples)
@@ -1451,10 +1714,10 @@ def calculate_windowed_y_offsets(overlap_v0, overlap_v1,
     if verbose:
         print(f"  Calculating Y-offsets at sampled positions...")
 
-    for i, z in enumerate(sampled_positions):
-        # Get surface profiles for this B-scan
-        profile_v0 = surface_v0[:, z]  # (X,) surface Y-positions
-        profile_v1 = surface_v1[:, z]
+    for i in range(n_samples):
+        # Get surface profiles for this sampled B-scan
+        profile_v0 = surface_v0[:, i]  # (X,) surface Y-positions
+        profile_v1 = surface_v1[:, i]
 
         # Calculate height differences
         diff = profile_v0 - profile_v1

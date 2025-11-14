@@ -74,6 +74,7 @@ try:
         find_optimal_y_shift_central_bscan,
         visualize_rotation_search,
         visualize_rotation_comparison,
+        visualize_contour_y_alignment,
         calculate_windowed_y_offsets,
         apply_windowed_y_alignment,
         visualize_windowed_offsets
@@ -82,6 +83,73 @@ try:
 except ImportError:
     ROTATION_AVAILABLE = False
     print("⚠️  Warning: Rotation alignment module not available")
+
+
+# ============================================================================
+# ROTATION AROUND SPECIFIC CENTER POINT
+# ============================================================================
+
+def rotate_volume_around_point(volume, angle_degrees, axes, center_point):
+    """
+    Rotate volume around a specific center point (not volume center).
+
+    This is critical for applying rotations calculated on overlap region
+    to the full volume. The rotation must happen around the SAME physical
+    point in both cases.
+
+    Algorithm:
+      1. Calculate offset from volume center to desired rotation center
+      2. Shift volume so rotation center becomes volume center
+      3. Apply rotation (rotates around volume center = our desired point)
+      4. Shift back to original position
+
+    Args:
+        volume: 3D numpy array (Y, X, Z)
+        angle_degrees: Rotation angle in degrees
+        axes: Tuple (axis1, axis2) defining rotation plane
+        center_point: Tuple (y_center, x_center, z_center) - rotation center
+
+    Returns:
+        Rotated volume
+    """
+    # Get volume center
+    volume_center = np.array(volume.shape) / 2.0
+
+    # Calculate offset from volume center to desired rotation center
+    offset = np.array(center_point) - volume_center
+
+    # Only shift in the axes that will be rotated
+    shift_before = np.zeros(3)
+    shift_before[list(axes)] = -offset[list(axes)]
+
+    # Step 1: Shift so rotation center aligns with volume center
+    volume_shifted = ndimage.shift(volume, shift=shift_before, order=1, mode='constant', cval=0)
+
+    # Step 2: Rotate (now rotates around our desired center point)
+    volume_rotated = ndimage.rotate(
+        volume_shifted,
+        angle=angle_degrees,
+        axes=axes,
+        reshape=False,
+        order=1,
+        mode='constant',
+        cval=0
+    )
+
+    # Step 3: Shift back
+    volume_final = ndimage.shift(volume_rotated, shift=-shift_before, order=1, mode='constant', cval=0)
+
+    return volume_final
+
+try:
+    from surface_parallel_alignment import (
+        align_surfaces_parallel,
+        visualize_surface_parallel_alignment
+    )
+    SURFACE_PARALLEL_AVAILABLE = True
+except ImportError:
+    SURFACE_PARALLEL_AVAILABLE = False
+    print("⚠️  Warning: Surface parallel alignment module not available")
 
 
 # ============================================================================
@@ -196,8 +264,8 @@ def step1_xz_alignment(volume_0, volume_1, data_dir):
         print("  Saving MIPs for future use...")
         np.save(mip_v0_path, mip_v0)
         np.save(mip_v1_path, mip_v1)
-        print(f"  ✓ Saved: {mip_v0_path.name}")
-        print(f"  ✓ Saved: {mip_v1_path.name}")
+        print(f"  [OK] Saved: {mip_v0_path.name}")
+        print(f"  [OK] Saved: {mip_v1_path.name}")
 
     print(f"  Vessel MIP V0: shape={mip_v0.shape}, mean={mip_v0.mean():.1f}, std={mip_v0.std():.1f}")
     print(f"  Vessel MIP V1: shape={mip_v1.shape}, mean={mip_v1.mean():.1f}, std={mip_v1.std():.1f}")
@@ -265,7 +333,7 @@ def step1_xz_alignment(volume_0, volume_1, data_dir):
         'vessel_mip_v1': mip_v1
     }
 
-    print("\n✓ Step 1 complete!")
+    print("\n[OK] Step 1 complete!")
     print("="*70)
 
     return results
@@ -313,7 +381,7 @@ def step2_y_alignment(step1_results, data_dir):
         order=1, mode='constant', cval=0
     )
 
-    print(f"\n✓ Applied Y shift: {y_shift:+.2f} px")
+    print(f"\n[OK] Applied Y shift: {y_shift:+.2f} px")
     print(f"  New center Y: {find_y_center(overlap_v1_y_aligned):.2f}")
 
     results = {
@@ -323,7 +391,7 @@ def step2_y_alignment(step1_results, data_dir):
         'center_y_v1': float(center_y_v1)
     }
 
-    print("\n✓ Step 2 complete!")
+    print("\n[OK] Step 2 complete!")
     print("="*70)
 
     return results
@@ -407,6 +475,22 @@ def step3_rotation_z(step1_results, step2_results, data_dir):
         verbose=True
     )
 
+    # Create visualization for Step 3.1
+    print(f"\n  Creating Step 3.1 visualization...")
+    vis_data = y_shift_results[0]  # Get visualization data from results
+    visualize_contour_y_alignment(
+        bscan_v0=vis_data['bscan_v0'],
+        bscan_v1=vis_data['bscan_v1'],
+        bscan_v0_denoised=vis_data['bscan_v0_denoised'],
+        bscan_v1_denoised=vis_data['bscan_v1_denoised'],
+        surface_v0=vis_data['surface_v0'],
+        surface_v1=vis_data['surface_v1'],
+        y_shift=y_shift_correction,
+        ncc_score=y_shift_ncc,
+        confidence=vis_data['confidence'],
+        output_path=data_dir / 'step3_1_contour_y_alignment.png'
+    )
+
     # Apply Y-shift correction if significant
     if abs(y_shift_correction) > 0.5:
         print(f"\n  Applying Y correction: {y_shift_correction:+.1f} px")
@@ -450,7 +534,7 @@ def step3_rotation_z(step1_results, step2_results, data_dir):
         'overlap_v1_rotated': overlap_v1_rotated
     }
 
-    print("\n✓ Step 3 complete (including Step 3.1 Y-axis re-alignment)!")
+    print("\n[OK] Step 3 complete (including Step 3.1 Y-axis re-alignment)!")
     print("="*70)
 
     return results
@@ -550,7 +634,7 @@ def step3_5_rotation_x(step1_results, step2_results, step3_results, data_dir):
         'overlap_v1_fully_rotated': overlap_v1_fully_rotated
     }
 
-    print("\n✓ Step 3.5 complete (X-axis rotation for Y-Z plane alignment)!")
+    print("\n[OK] Step 3.5 complete (X-axis rotation for Y-Z plane alignment)!")
     print("="*70)
 
     return results
@@ -650,7 +734,7 @@ def step4_windowed_y_alignment(step1_results, step3_results, data_dir):
         'ncc_total_improvement_percent': float(total_improvement)
     }
 
-    print("\n✓ Step 4 complete (windowed Y-axis alignment)!")
+    print("\n[OK] Step 4 complete (windowed Y-axis alignment)!")
     print("="*70)
 
     return results
@@ -703,7 +787,7 @@ def step5_bspline_registration(step1_results, step4_results, data_dir, save_chec
             ncc_step4=step4_results['ncc_after_windowed'],
             ncc_before=step1_results.get('ncc_before', step4_results['ncc_after_windowed'])
         )
-        print(f"  ✓ Checkpoint saved: {checkpoint_path.name}")
+        print(f"  [OK] Checkpoint saved: {checkpoint_path.name}")
 
     # Check if ITK-Elastix is available
     try:
@@ -725,7 +809,7 @@ def step5_bspline_registration(step1_results, step4_results, data_dir, save_chec
         print("   ✗ Volumes are all zeros")
         return None
 
-    print(f"   ✓ Volumes valid: {overlap_v0.shape}, dtype={overlap_v0.dtype}")
+    print(f"   [OK] Volumes valid: {overlap_v0.shape}, dtype={overlap_v0.dtype}")
 
     # Quick ITK conversion test
     print("   Testing ITK conversion...")
@@ -735,7 +819,7 @@ def step5_bspline_registration(step1_results, step4_results, data_dir, save_chec
         if test_arr.shape != (10, 10, 10):
             print(f"   ✗ ITK conversion test failed: got shape {test_arr.shape}")
             return None
-        print("   ✓ ITK conversion test passed")
+        print("   [OK] ITK conversion test passed")
     except Exception as e:
         print(f"   ✗ ITK test failed: {e}")
         return None
@@ -784,7 +868,7 @@ def step5_bspline_registration(step1_results, step4_results, data_dir, save_chec
     # Save deformation field for later analysis
     print("\n5. Saving deformation field...")
     np.save(data_dir / 'step5_deformation_field.npy', deformation_field)
-    print(f"   ✓ Saved: step5_deformation_field.npy ({deformation_field.shape})")
+    print(f"   [OK] Saved: step5_deformation_field.npy ({deformation_field.shape})")
 
     results = {
         'overlap_v1_bspline': registered_volume,
@@ -799,7 +883,7 @@ def step5_bspline_registration(step1_results, step4_results, data_dir, save_chec
         'std_displacement': metrics['std_displacement']
     }
 
-    print("\n✓ Step 5 complete (B-spline non-rigid registration)!")
+    print("\n[OK] Step 5 complete (B-spline non-rigid registration)!")
     print("="*70)
 
     return results
@@ -883,7 +967,7 @@ def visualize_step1(volume_0, volume_1, step1_results, data_dir):
 
     output_path = data_dir / 'step1_xz_alignment.png'
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    print(f"✓ Saved: {output_path}")
+    print(f"[OK] Saved: {output_path}")
     plt.close()
 
 
@@ -1001,7 +1085,7 @@ def visualize_step2(step1_results, step2_results, data_dir):
 
     output_path = data_dir / 'step2_y_alignment.png'
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    print(f"✓ Saved: {output_path}")
+    print(f"[OK] Saved: {output_path}")
     plt.close()
 
 
@@ -1040,7 +1124,7 @@ def visualize_step3(step1_results, step2_results, step3_results, data_dir):
         output_path=data_dir / 'step3_rotation_comparison.png'
     )
 
-    print("✓ Step 3 visualizations complete!")
+    print("[OK] Step 3 visualizations complete!")
 
 
 # ============================================================================
@@ -1070,9 +1154,9 @@ def visualize_surfaces_after_xz(volume_0, volume_1, volume_1_xz_aligned, step1_r
     surface_v1 = load_or_detect_surface(volume_1, method='peak')
     surface_v1_xz = load_or_detect_surface(volume_1_xz_aligned, method='peak')
 
-    print(f"  ✓ Surface V0: {surface_v0.shape}")
-    print(f"  ✓ Surface V1 (before): {surface_v1.shape}")
-    print(f"  ✓ Surface V1 (after XZ): {surface_v1_xz.shape}")
+    print(f"  [OK] Surface V0: {surface_v0.shape}")
+    print(f"  [OK] Surface V1 (before): {surface_v1.shape}")
+    print(f"  [OK] Surface V1 (after XZ): {surface_v1_xz.shape}")
 
     # Create visualizations
     print("\n2. Creating surface alignment visualization...")
@@ -1142,10 +1226,10 @@ def generate_3d_visualizations(volume_0, step1_results, step2_results, data_dir,
             volume_1_xz_aligned, shift=(y_shift, 0, 0),
             order=1, mode='constant', cval=0
         )
-        print(f"  ✓ Volume 1 fully aligned: {volume_1_aligned.shape}")
+        print(f"  [OK] Volume 1 fully aligned: {volume_1_aligned.shape}")
     else:
         print("\n1. Using pre-aligned volume (with rotations applied)...")
-        print(f"  ✓ Volume 1 fully aligned: {volume_1_aligned.shape}")
+        print(f"  [OK] Volume 1 fully aligned: {volume_1_aligned.shape}")
 
     # Build transform dict
     transform_3d = {
@@ -1160,7 +1244,7 @@ def generate_3d_visualizations(volume_0, step1_results, step2_results, data_dir,
         volume_0, volume_1_aligned, transform_3d
     )
 
-    print(f"\n✓ Merged volume created: {merged_volume.shape}")
+    print(f"\n[OK] Merged volume created: {merged_volume.shape}")
     print(f"  Total voxels: {merge_metadata['total_voxels']:,}")
     print(f"  Data loss: {merge_metadata['data_loss']}% ✅")
 
@@ -1190,7 +1274,7 @@ def generate_3d_visualizations(volume_0, step1_results, step2_results, data_dir,
     # Save merged volume
     # print("\n4. Saving merged volume...")
     # np.save(data_dir / 'merged_volume_3d.npy', merged_volume)
-    # print(f"  ✓ Saved: {data_dir / 'merged_volume_3d.npy'}")
+    # print(f"  [OK] Saved: {data_dir / 'merged_volume_3d.npy'}")
 
     print("\n" + "="*70)
     print("✅ 3D VISUALIZATIONS COMPLETE!")
@@ -1223,12 +1307,16 @@ Examples:
 
   # Run all steps with 3D visualization
   python alignment_pipeline.py --all --visual
+
+  # Surface parallel alignment only (central B-scans)
+  python alignment_pipeline.py --just-surface
         """
     )
     parser.add_argument('--step', type=int, help='Run specific step (1=XZ, 2=Y, 3=Rotation)')
     parser.add_argument('--steps', type=int, nargs='+', help='Run multiple steps')
     parser.add_argument('--all', action='store_true', help='Run all steps (1+2+3)')
     parser.add_argument('--step5-only', action='store_true', help='Run only Step 5 (B-spline) from checkpoint')
+    parser.add_argument('--just-surface', action='store_true', help='Run ONLY surface parallel alignment on central B-scans')
     parser.add_argument('--visual', action='store_true', help='Generate 3D visualizations after alignment')
 
     args = parser.parse_args()
@@ -1250,7 +1338,7 @@ Examples:
             print("   Run the full pipeline first with: python alignment_pipeline.py --steps 1 2 3")
             return
 
-        print(f"  ✓ Loading checkpoint: {checkpoint_path.name}")
+        print(f"  [OK] Loading checkpoint: {checkpoint_path.name}")
         checkpoint = np.load(checkpoint_path)
 
         # Create minimal step1_results and step4_results
@@ -1264,8 +1352,8 @@ Examples:
             'ncc_before_windowed': float(checkpoint['ncc_before'])
         }
 
-        print(f"  ✓ Loaded overlap volumes: {checkpoint['overlap_v0'].shape}")
-        print(f"  ✓ Step 4 NCC: {checkpoint['ncc_step4']:.4f}")
+        print(f"  [OK] Loaded overlap volumes: {checkpoint['overlap_v0'].shape}")
+        print(f"  [OK] Step 4 NCC: {checkpoint['ncc_step4']:.4f}")
 
         # Run Step 5 only (don't save checkpoint again)
         step5_results = step5_bspline_registration(step1_results, step4_results, data_dir, save_checkpoint=False)
@@ -1279,6 +1367,73 @@ Examples:
 
         return
 
+    # Handle surface parallel alignment mode
+    if args.just_surface:
+        if not SURFACE_PARALLEL_AVAILABLE:
+            print("\n❌ Error: Surface parallel alignment module not available")
+            return
+
+        print("="*70)
+        print("SURFACE PARALLEL ALIGNMENT - CENTRAL B-SCAN ONLY")
+        print("="*70)
+        print("Loading volumes to extract central B-scans...")
+
+        # Load OCT volumes
+        print("\nLoading OCT volumes...")
+        processor = OCTImageProcessor(sidebar_width=250, crop_top=100, crop_bottom=50)
+        loader = OCTVolumeLoader(processor)
+
+        # Find volume directories
+        bmp_dirs = []
+        for bmp_file in oct_data_dir.rglob('*.bmp'):
+            vol_dir = bmp_file.parent
+            if vol_dir not in bmp_dirs:
+                bmp_dirs.append(vol_dir)
+
+        f001_vols = sorted([v for v in bmp_dirs if 'F001_IP' in str(v)])
+
+        if len(f001_vols) < 2:
+            print("\n❌ Error: Need at least 2 F001 volumes")
+            return
+
+        print(f"  Volume 0: {f001_vols[0].name}")
+        print(f"  Volume 1: {f001_vols[1].name}")
+
+        volume_0 = loader.load_volume_from_directory(str(f001_vols[0]))
+        volume_1 = loader.load_volume_from_directory(str(f001_vols[1]))
+
+        print(f"  [OK] V0 shape: {volume_0.shape}")
+        print(f"  [OK] V1 shape: {volume_1.shape}")
+
+        # Extract B-scans at index 40
+        z_index = 40
+        bscan_v0 = volume_0[:, :, z_index]
+        bscan_v1 = volume_1[:, :, z_index]
+        print(f"\n  Extracted B-scans at Z={z_index}:")
+        print(f"  V0: shape={bscan_v0.shape}")
+        print(f"  V1: shape={bscan_v1.shape}")
+
+        # Run surface parallel alignment
+        results = align_surfaces_parallel(bscan_v0, bscan_v1, verbose=True)
+
+        # Visualize results
+        print("\nCreating visualization...")
+        output_path = data_dir / 'surface_parallel_alignment.png'
+        visualize_surface_parallel_alignment(results, output_path=output_path)
+
+        print("\n" + "="*70)
+        print("SURFACE PARALLEL ALIGNMENT COMPLETE")
+        print("="*70)
+        print(f"\nResults:")
+        print(f"  V0 surface angle: {results['angle_v0']:+.3f}°")
+        print(f"  V1 surface angle (before): {results['angle_v1_before']:+.3f}°")
+        print(f"  Rotation applied: {results['rotation_applied']:+.3f}°")
+        print(f"  V1 surface angle (after): {results['angle_v1_after']:+.3f}°")
+        print(f"  Residual angle difference: {results['angle_v1_after'] - results['angle_v0']:+.3f}°")
+        print(f"\nVisualization saved: {output_path}")
+
+        return
+
     # Determine which steps to run
     if args.all:
         steps_to_run = [1, 2, 3]
@@ -1287,7 +1442,7 @@ Examples:
     elif args.step:
         steps_to_run = [args.step]
     else:
-        print("Error: Must specify --step, --steps, --all, or --step5-only")
+        print("Error: Must specify --step, --steps, --all, --just-surface, or --step5-only")
         parser.print_help()
         return
 
@@ -1321,15 +1476,15 @@ Examples:
 
     # Try to load existing results if not running those steps
     if 1 not in steps_to_run and step1_path.exists():
-        print(f"\n✓ Loading existing Step 1 results from {step1_path.name}")
+        print(f"\n[OK] Loading existing Step 1 results from {step1_path.name}")
         step1_results = np.load(step1_path, allow_pickle=True).item()
 
     if 2 not in steps_to_run and step2_path.exists():
-        print(f"✓ Loading existing Step 2 results from {step2_path.name}")
+        print(f"[OK] Loading existing Step 2 results from {step2_path.name}")
         step2_results = np.load(step2_path, allow_pickle=True).item()
 
     if 3 not in steps_to_run and step3_path.exists():
-        print(f"✓ Loading existing Step 3 results from {step3_path.name}")
+        print(f"[OK] Loading existing Step 3 results from {step3_path.name}")
         step3_results = np.load(step3_path, allow_pickle=True).item()
 
     # Load volumes only if needed
@@ -1422,12 +1577,12 @@ Examples:
                         # Merge Step 4 results into step3_results
                         step3_results = {**step3_results, **step4_results}
 
-                        # Step 5: B-spline non-rigid registration
-                        step5_results = step5_bspline_registration(step1_results, step4_results, data_dir)
-
-                        if step5_results is not None:
-                            # Merge Step 5 results into step3_results
-                            step3_results = {**step3_results, **step5_results}
+                        # COMMENTED OUT: Step 5 - B-spline non-rigid registration
+                        # We're skipping this step to verify rigid alignment quality first
+                        # step5_results = step5_bspline_registration(step1_results, step4_results, data_dir)
+                        # if step5_results is not None:
+                        #     # Merge Step 5 results into step3_results
+                        #     step3_results = {**step3_results, **step5_results}
 
                 # Save (includes Steps 3, 3.5, 4, and 5 results)
                 combined_results = {**step1_results, **step2_results, **step3_results}
@@ -1486,25 +1641,68 @@ Examples:
                     order=1, mode='constant', cval=0
                 )
 
-                # Apply Z-axis rotation (B-scan alignment)
-                volume_1_aligned = apply_rotation_z(volume_1_aligned, rotation_angle_z, axes=(0, 1))
+                # Calculate overlap region center in full volume coordinates
+                # This is the rotation center used during alignment steps
+                overlap_bounds = step1_results['overlap_bounds']
+                x_start, x_end = overlap_bounds['x']
+                z_start, z_end = overlap_bounds['z']
 
-                # Apply X-axis rotation if available (Y-Z plane alignment)
+                # Center of overlap region (in full volume coordinates)
+                overlap_center = np.array([
+                    volume_1_aligned.shape[0] / 2.0,  # Y: same as volume (not cropped in Step 1)
+                    (x_start + x_end) / 2.0,          # X: center of overlap region
+                    (z_start + z_end) / 2.0           # Z: center of overlap region
+                ])
+
+                print(f"\n  Overlap center in full volume: Y={overlap_center[0]:.1f}, X={overlap_center[1]:.1f}, Z={overlap_center[2]:.1f}")
+                print(f"  Full volume center: Y={volume_1_aligned.shape[0]/2:.1f}, X={volume_1_aligned.shape[1]/2:.1f}, Z={volume_1_aligned.shape[2]/2:.1f}")
+
+                # Apply Z-axis rotation (B-scan alignment) around overlap center
+                print(f"  Applying Z-rotation ({rotation_angle_z:+.2f}°) around overlap center...")
+                volume_1_aligned = rotate_volume_around_point(
+                    volume_1_aligned,
+                    rotation_angle_z,
+                    axes=(0, 1),  # Y-X plane
+                    center_point=overlap_center
+                )
+
+                # Apply X-axis rotation if available (Y-Z plane alignment) around overlap center
                 if rotation_angle_x is not None:
-                    volume_1_aligned = apply_rotation_x(volume_1_aligned, rotation_angle_x, axes=(0, 2))
+                    print(f"  Applying X-rotation ({rotation_angle_x:+.2f}°) around overlap center...")
+                    volume_1_aligned = rotate_volume_around_point(
+                        volume_1_aligned,
+                        rotation_angle_x,
+                        axes=(0, 2),  # Y-Z plane
+                        center_point=overlap_center
+                    )
 
                 # Apply windowed Y-alignment if available (Step 4)
                 if 'y_offsets_interpolated' in step3_results:
                     print("  Applying windowed Y-offsets to full volume...")
                     y_offsets_overlap = step3_results['y_offsets_interpolated']
 
-                    # Extend offsets to match full volume size if needed
-                    if volume_1_aligned.shape[2] > len(y_offsets_overlap):
-                        # Pad with edge values
-                        pad_size = volume_1_aligned.shape[2] - len(y_offsets_overlap)
-                        y_offsets_full = np.pad(y_offsets_overlap, (0, pad_size), mode='edge')
-                    else:
-                        y_offsets_full = y_offsets_overlap
+                    # Get overlap bounds to map offsets to full volume coordinates
+                    overlap_bounds = step1_results['overlap_bounds']
+                    z_start, z_end = overlap_bounds['z']
+
+                    print(f"    Overlap region in full volume: Z[{z_start}:{z_end}] ({len(y_offsets_overlap)} B-scans)")
+                    print(f"    Full volume Z size: {volume_1_aligned.shape[2]} B-scans")
+
+                    # Create full-size y_offsets array (initialized to 0 for regions outside overlap)
+                    y_offsets_full = np.zeros(volume_1_aligned.shape[2])
+
+                    # Place overlap offsets at correct indices in full volume
+                    y_offsets_full[z_start:z_end] = y_offsets_overlap
+
+                    # For B-scans before overlap, use first offset value (smooth transition)
+                    if z_start > 0:
+                        y_offsets_full[:z_start] = y_offsets_overlap[0]
+
+                    # For B-scans after overlap, use last offset value (smooth transition)
+                    if z_end < volume_1_aligned.shape[2]:
+                        y_offsets_full[z_end:] = y_offsets_overlap[-1]
+
+                    print(f"    Mapped offsets: range=[{y_offsets_full.min():.2f}, {y_offsets_full.max():.2f}] px")
 
                     volume_1_aligned = apply_windowed_y_alignment(
                         volume_1_aligned,

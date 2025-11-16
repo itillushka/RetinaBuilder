@@ -32,3 +32,10 @@ oct_data/
 .claude/
 notebooks/data/
 __pycache__/
+# Large test/output files - should not be in repo
+standalone_merged_volume.npy
+*.npy
+data/*.npy
+*.png
+*.jpg
+*.jpeg

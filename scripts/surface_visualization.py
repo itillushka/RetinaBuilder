@@ -11,24 +11,83 @@ Visualizes the common surface overlap region after XZ alignment.
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy import ndimage
+import cv2
 
 
-def load_or_detect_surface(volume, method='peak'):
+def denoise_bscan_for_surface_detection(bscan):
     """
-    Detect retinal surface from volume.
+    Apply harsh denoising to B-scan for robust surface detection.
 
-    Simple peak detection: finds brightest Y position for each (X, Z) location.
+    Uses the same aggressive preprocessing as rotation alignment (Steps 3, 3.1, 3.5).
+
+    Args:
+        bscan: 2D B-scan array (Y, X)
+
+    Returns:
+        Denoised B-scan (Y, X) as uint8
+    """
+    # Normalize to 0-255
+    img_norm = ((bscan - bscan.min()) / (bscan.max() - bscan.min() + 1e-8) * 255).astype(np.uint8)
+
+    # Step 1: Non-local means denoising (HARSH)
+    denoised = cv2.fastNlMeansDenoising(img_norm, h=25, templateWindowSize=7, searchWindowSize=21)
+
+    # Step 2: Bilateral filtering (HARSH)
+    denoised = cv2.bilateralFilter(denoised, d=11, sigmaColor=150, sigmaSpace=150)
+
+    # Step 3: Median filter (HARSH)
+    denoised = cv2.medianBlur(denoised, 15)
+
+    # Step 4: Threshold (50% of Otsu - preserves tissue layers)
+    thresh_val = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[0]
+    thresh_val = int(thresh_val * 0.5)
+    denoised[denoised < thresh_val] = 0
+
+    # Step 5: CLAHE contrast enhancement
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    denoised = clahe.apply(denoised)
+
+    return denoised
+
+
+def load_or_detect_surface(volume, method='peak', sampled_positions=None):
+    """
+    Detect retinal surface from volume with harsh denoising preprocessing.
+
+    PERFORMANCE OPTIMIZATION: If sampled_positions is provided, only denoises
+    those B-scans. Otherwise denoises all B-scans (slow for full volumes).
 
     Args:
         volume: 3D OCT volume (Y, X, Z)
         method: Detection method ('peak' for maximum intensity)
+        sampled_positions: Optional array of Z-indices to process (for Step 4 windowed alignment)
+                          If None, processes all Z slices (slower)
 
     Returns:
-        surface: 2D array (X, Z) with Y positions of surface
+        surface: 2D array (X, Z_sampled) with Y positions of surface
+                 If sampled_positions provided: Z_sampled = len(sampled_positions)
+                 Otherwise: Z_sampled = Z (full volume)
     """
+    Y, X, Z = volume.shape
+
+    # Determine which Z slices to process
+    if sampled_positions is not None:
+        z_indices = sampled_positions
+    else:
+        z_indices = np.arange(Z)
+
+    surface = np.zeros((X, len(z_indices)))
+
     if method == 'peak':
-        # Find Y position of maximum intensity for each (X, Z)
-        surface = np.argmax(volume, axis=0)  # Shape: (X, Z)
+        # Process only the specified B-scans with harsh denoising
+        for i, z in enumerate(z_indices):
+            bscan = volume[:, :, z]  # (Y, X)
+
+            # Apply harsh denoising
+            bscan_denoised = denoise_bscan_for_surface_detection(bscan)
+
+            # Find Y position of maximum intensity for each X
+            surface[:, i] = np.argmax(bscan_denoised, axis=0)  # (X,)
     else:
         raise ValueError(f"Unknown method: {method}")
 

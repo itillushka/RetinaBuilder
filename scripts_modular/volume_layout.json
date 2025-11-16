@@ -1,0 +1,97 @@
+{
+  "description": "9-volume panoramic OCT stitching configuration - Cross/Plus pattern layout",
+  "subsampling": {
+    "enabled": true,
+    "z_stride": 2,
+    "description": "Load every 2nd B-scan for memory optimization (~50% reduction)"
+  },
+  "volumes": {
+    "1": {
+      "position": "center",
+      "folder": "folder_1",
+      "role": "reference",
+      "description": "Central reference volume - all neighbors stitch to this"
+    },
+    "2": {
+      "position": "right",
+      "folder": "folder_2",
+      "neighbor": 1,
+      "level": 1,
+      "description": "Right neighbor - overlaps with center volume"
+    },
+    "3": {
+      "position": "far_right",
+      "folder": "folder_3",
+      "neighbor": 2,
+      "level": 2,
+      "description": "Far right extension - overlaps only with volume 2, not center"
+    },
+    "4": {
+      "position": "left",
+      "folder": "folder_4",
+      "neighbor": 1,
+      "level": 1,
+      "description": "Left neighbor - overlaps with center volume"
+    },
+    "5": {
+      "position": "far_left",
+      "folder": "folder_5",
+      "neighbor": 4,
+      "level": 2,
+      "description": "Far left extension - overlaps only with volume 4, not center"
+    },
+    "6": {
+      "position": "up",
+      "folder": "folder_6",
+      "neighbor": 1,
+      "level": 1,
+      "description": "Upper neighbor - overlaps with center volume"
+    },
+    "7": {
+      "position": "far_up",
+      "folder": "folder_7",
+      "neighbor": 6,
+      "level": 2,
+      "description": "Far upper extension - overlaps only with volume 6, not center"
+    },
+    "8": {
+      "position": "down",
+      "folder": "folder_8",
+      "neighbor": 1,
+      "level": 1,
+      "description": "Lower neighbor - overlaps with center volume"
+    },
+    "9": {
+      "position": "far_down",
+      "folder": "folder_9",
+      "neighbor": 8,
+      "level": 2,
+      "description": "Far lower extension - overlaps only with volume 8, not center"
+    }
+  },
+  "stitching_order": {
+    "level_1": {
+      "description": "Parallel: All neighbors stitch to center volume",
+      "pairs": [
+        {"reference": 1, "moving": 2},
+        {"reference": 1, "moving": 4},
+        {"reference": 1, "moving": 6},
+        {"reference": 1, "moving": 8}
+      ]
+    },
+    "level_2": {
+      "description": "Parallel: All extensions stitch to their respective neighbors",
+      "pairs": [
+        {"reference": 2, "moving": 3},
+        {"reference": 4, "moving": 5},
+        {"reference": 6, "moving": 7},
+        {"reference": 8, "moving": 9}
+      ]
+    }
+  },
+  "output": {
+    "merged_volume_filename": "panorama_merged_9volumes.npy",
+    "visualization_prefix": "panorama_9vol",
+    "results_directory": "results"
+  }
+}

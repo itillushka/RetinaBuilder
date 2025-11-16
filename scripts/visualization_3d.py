@@ -136,13 +136,16 @@ def create_expanded_merged_volume(volume_0, volume_1, transform_3d):
     return expanded, metadata
 
 
-def visualize_3d_multiangle(volume, title, output_path, subsample=4, percentile=70):
+def visualize_3d_multiangle(volume, title, output_path, subsample=4, percentile=70, z_crop_front=0):
     """
     Create 3D volume projections from multiple angles.
 
     EXACT implementation from notebook 06.
 
     Shows 4 views: X-axis (side), Y-axis (front), Z-axis (top), 45° angle
+
+    Args:
+        z_crop_front: Remove this many B-scans from the front (default: 0)
     """
     print(f"\nCreating 3D multi-angle visualization: {title}")
 
@@ -151,6 +154,13 @@ def visualize_3d_multiangle(volume, title, output_path, subsample=4, percentile=
     # Subsample volume for visualization
     vol_sub = volume[::subsample, ::subsample, ::subsample]
     print(f"  Subsampled to: {vol_sub.shape}")
+
+    # Crop front B-scans if requested (in subsampled space)
+    z_crop_sub = z_crop_front // subsample
+    if z_crop_sub > 0:
+        vol_sub = vol_sub[:, :, z_crop_sub:]
+        print(f"  Cropped front {z_crop_front} B-scans ({z_crop_sub} after subsampling)")
+        print(f"  New shape: {vol_sub.shape}")
 
     # Threshold to show only high-intensity voxels
     threshold = np.percentile(vol_sub[vol_sub > 0], percentile)
@@ -169,7 +179,8 @@ def visualize_3d_multiangle(volume, title, output_path, subsample=4, percentile=
     ax1.set_xlabel('Height (Y)')
     ax1.set_ylabel('Width (X)')
     ax1.set_zlabel('Depth (Z)')
-    ax1.set_title('X-Axis View (Side/Sagittal)', fontsize=12, fontweight='bold')
+    title_suffix = f' [Front {z_crop_front} B-scans removed]' if z_crop_front > 0 else ''
+    ax1.set_title(f'X-Axis View (Side/Sagittal){title_suffix}', fontsize=12, fontweight='bold')
     ax1.view_init(elev=0, azim=0)
 
     # View 2: Y-axis (coronal/front view)
@@ -178,7 +189,7 @@ def visualize_3d_multiangle(volume, title, output_path, subsample=4, percentile=
     ax2.set_xlabel('Height (Y)')
     ax2.set_ylabel('Width (X)')
     ax2.set_zlabel('Depth (Z)')
-    ax2.set_title('Y-Axis View (Front/Coronal)', fontsize=12, fontweight='bold')
+    ax2.set_title(f'Y-Axis View (Front/Coronal){title_suffix}', fontsize=12, fontweight='bold')
     ax2.view_init(elev=0, azim=90)
 
     # View 3: Z-axis (axial/top view)
@@ -187,7 +198,7 @@ def visualize_3d_multiangle(volume, title, output_path, subsample=4, percentile=
     ax3.set_xlabel('Height (Y)')
     ax3.set_ylabel('Width (X)')
     ax3.set_zlabel('Depth (Z)')
-    ax3.set_title('Z-Axis View (Top/Axial)', fontsize=12, fontweight='bold')
+    ax3.set_title(f'Z-Axis View (Top/Axial){title_suffix}', fontsize=12, fontweight='bold')
     ax3.view_init(elev=90, azim=-90)
 
     # View 4: 45° angle
@@ -196,7 +207,7 @@ def visualize_3d_multiangle(volume, title, output_path, subsample=4, percentile=
     ax4.set_xlabel('Height (Y)')
     ax4.set_ylabel('Width (X)')
     ax4.set_zlabel('Depth (Z)')
-    ax4.set_title('45° Angle View (Isometric)', fontsize=12, fontweight='bold')
+    ax4.set_title(f'45° Angle View (Isometric){title_suffix}', fontsize=12, fontweight='bold')
     ax4.view_init(elev=30, azim=45)
 
     plt.suptitle(title, fontsize=16, fontweight='bold')

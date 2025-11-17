@@ -38,35 +38,35 @@ def generate_3d_visualizations(volume_0, step1_results, step2_results, data_dir,
     y_shift = step2_results['y_shift']
     if step3_results and 'y_shift_correction' in step3_results:
         y_shift_correction = step3_results['y_shift_correction']
-        total_y_shift = y_shift + y_shift_correction
+        total_y_shift = -(y_shift + y_shift_correction)  # INVERTED
         print(f"  Y-offset calculation:")
         print(f"    Base Y-shift (Step 2): {y_shift:.2f}")
         print(f"    Y-correction (Step 3): {y_shift_correction:.2f}")
-        print(f"    Total Y-offset: {total_y_shift:.2f}")
+        print(f"    Total Y-offset (INVERTED): {total_y_shift:.2f}")
     else:
-        total_y_shift = y_shift
-        print(f"  Y-offset: {y_shift:.2f} (no Step 3 correction)")
+        total_y_shift = -y_shift  # INVERTED
+        print(f"  Y-offset (INVERTED): {total_y_shift:.2f} (no Step 3 correction)")
 
     # Use provided aligned volume or reconstruct it
     if volume_1_aligned is None:
-        # Get aligned volume
+        # Get XZ-aligned volume (NO Y-shift applied to data)
         volume_1_xz_aligned = step1_results['volume_1_xz_aligned']
 
-        # Apply Y shift to full volume 1
-        print("\n1. Applying Y shift to full volume...")
-        volume_1_aligned = ndimage.shift(
-            volume_1_xz_aligned, shift=(total_y_shift, 0, 0),
-            order=1, mode='constant', cval=0
-        )
-        print(f"  [OK] Volume 1 fully aligned: {volume_1_aligned.shape}")
+        # DO NOT shift volume data - only use offset for placement!
+        # This preserves the original data without interpolation artifacts
+        print("\n1. Using XZ-aligned volume (Y-offset for placement only)...")
+        volume_1_aligned = volume_1_xz_aligned  # No Y-shift to data!
+        print(f"  [OK] Volume 1 (XZ-aligned): {volume_1_aligned.shape}")
 
-        # Transformations already applied to volume_1_aligned (XZ from Step 1, Y from Step 2)
-        # Pass TOTAL offsets for merge function to understand coordinate system
+        # Y-offset is used ONLY for placement in merge function, NOT applied to data
+        # This prevents interpolation artifacts and shape distortion
         transform_3d = {
-            'dy': float(total_y_shift),
+            'dy': float(total_y_shift),  # For PLACEMENT only
             'dx': float(step1_results['offset_x']),
             'dz': float(step1_results['offset_z'])
         }
+        print(f"  [INFO] Y-offset {total_y_shift:.2f}px will be used for placement (not applied to data)")
+
     else:
         print("\n1. Using pre-aligned volume (with ALL transformations applied)...")
         print(f"  [OK] Volume 1 fully aligned: {volume_1_aligned.shape}")
@@ -78,7 +78,7 @@ def generate_3d_visualizations(volume_0, step1_results, step2_results, data_dir,
             'dx': float(step1_results['offset_x']),
             'dz': float(step1_results['offset_z'])
         }
-        print(f"  ℹ️  Using offsets for spatial placement: dy={total_y_shift:.2f}, dx={step1_results['offset_x']}, dz={step1_results['offset_z']}")
+        print(f"  [INFO] Using offsets for spatial placement: dy={total_y_shift:.2f}, dx={step1_results['offset_x']}, dz={step1_results['offset_z']}")
 
     # Create merged volume
     print("\n2. Creating expanded merged volume...")
@@ -96,43 +96,43 @@ def generate_3d_visualizations(volume_0, step1_results, step2_results, data_dir,
     # Generate visualizations
     print("\n3. Generating 3D projections...")
 
-    # COMPARISON: Create merged volume WITHOUT Y-alignment
-    print("\n  [Comparison] Creating merged volume WITHOUT Y-alignment...")
-    transform_3d_no_y = {
-        'dy': 0,  # NO Y-alignment for comparison
-        'dx': float(step1_results['offset_x']),
-        'dz': float(step1_results['offset_z'])
-    }
+    # COMPARISON: Create merged volume WITHOUT Y-alignment - SKIPPED FOR FASTER TESTING
+    # print("\n  [Comparison] Creating merged volume WITHOUT Y-alignment...")
+    # transform_3d_no_y = {
+    #     'dy': 0,  # NO Y-alignment for comparison
+    #     'dx': float(step1_results['offset_x']),
+    #     'dz': float(step1_results['offset_z'])
+    # }
+    #
+    # # Get volume with only XZ alignment (no Y, no rotation)
+    # volume_1_xz_only = step1_results.get('volume_1_xz_aligned', None)
+    # if volume_1_xz_only is not None:
+    #     merged_no_y, merge_metadata_no_y = create_expanded_merged_volume(
+    #         volume_0, volume_1_xz_only, transform_3d_no_y
+    #     )
+    #     source_labels_no_y = merge_metadata_no_y.get('source_labels', None)
+    #
+    #     visualize_3d_multiangle(
+    #         merged_no_y,
+    #         title="WITHOUT Y-Alignment (XZ only) - For Comparison",
+    #         output_path=data_dir / '3d_merged_NO_Y_alignment.png',
+    #         subsample=8,
+    #         percentile=75,
+    #         source_labels=source_labels_no_y
+    #     )
+    #     print(f"  ✓ Saved comparison (NO Y-alignment): 3d_merged_NO_Y_alignment.png")
 
-    # Get volume with only XZ alignment (no Y, no rotation)
-    volume_1_xz_only = step1_results.get('volume_1_xz_aligned', None)
-    if volume_1_xz_only is not None:
-        merged_no_y, merge_metadata_no_y = create_expanded_merged_volume(
-            volume_0, volume_1_xz_only, transform_3d_no_y
-        )
-        source_labels_no_y = merge_metadata_no_y.get('source_labels', None)
+    # Multi-angle merged volume (full) - SKIPPED FOR FASTER TESTING
+    # visualize_3d_multiangle(
+    #     merged_volume,
+    #     title="WITH Full Alignment (XZ + Y + Rotation) - Final Result",
+    #     output_path=data_dir / '3d_merged_multiangle.png',
+    #     subsample=8,  # Every 8th voxel for good quality/speed balance
+    #     percentile=75,  # Show more tissue (less aggressive filtering)
+    #     source_labels=source_labels  # Enable color coding
+    # )
 
-        visualize_3d_multiangle(
-            merged_no_y,
-            title="WITHOUT Y-Alignment (XZ only) - For Comparison",
-            output_path=data_dir / '3d_merged_NO_Y_alignment.png',
-            subsample=8,
-            percentile=75,
-            source_labels=source_labels_no_y
-        )
-        print(f"  ✓ Saved comparison (NO Y-alignment): 3d_merged_NO_Y_alignment.png")
-
-    # Multi-angle merged volume (full) - WITH COLOR CODING
-    visualize_3d_multiangle(
-        merged_volume,
-        title="WITH Full Alignment (XZ + Y + Rotation) - Final Result",
-        output_path=data_dir / '3d_merged_multiangle.png',
-        subsample=8,  # Every 8th voxel for good quality/speed balance
-        percentile=75,  # Show more tissue (less aggressive filtering)
-        source_labels=source_labels  # Enable color coding
-    )
-
-    # Multi-angle merged volume (with back 80 B-scans removed for clearer view) - WITH COLOR CODING
+    # Multi-angle merged volume (with back 80 B-scans removed for clearer view) - WITH COLOR CODING - KEEP THIS ONE
     visualize_3d_multiangle(
         merged_volume,
         title="Merged Volume: Multi-Angle 3D Projections (Back 80 B-scans Removed, Color-Coded)",

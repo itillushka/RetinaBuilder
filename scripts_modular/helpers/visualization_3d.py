@@ -291,7 +291,7 @@ def visualize_3d_multiangle(volume, title, output_path, subsample=4, percentile=
     print(f"  ✓ Saved: {output_path}")
 
 
-def visualize_3d_comparison(volume_0, volume_1_aligned, merged_volume, transform, output_path, subsample=4, percentile=70):
+def visualize_3d_comparison(volume_0, volume_1_aligned, merged_volume, transform, output_path, subsample=4, percentile=70, z_crop_front=0, z_crop_back=0):
     """
     Create side-by-side 3D volume comparison.
 
@@ -299,10 +299,26 @@ def visualize_3d_comparison(volume_0, volume_1_aligned, merged_volume, transform
 
     Shows: Volume 0, Volume 1 (aligned), Merged volume
     From 4 angles: X-axis, Y-axis, Z-axis, 45°
+
+    Args:
+        z_crop_front: Number of B-scans to remove from front (default: 0)
+        z_crop_back: Number of B-scans to remove from back (default: 0)
     """
     print("\nCreating side-by-side 3D comparison...")
+    if z_crop_front > 0 or z_crop_back > 0:
+        print(f"  Cropping: {z_crop_front} B-scans from front, {z_crop_back} from back")
 
     fig = plt.figure(figsize=(20, 24))
+
+    # Crop B-scans if requested
+    if z_crop_back > 0:
+        volume_0 = volume_0[:, :, :-z_crop_back]
+        volume_1_aligned = volume_1_aligned[:, :, :-z_crop_back]
+        merged_volume = merged_volume[:, :, :-z_crop_back]
+    if z_crop_front > 0:
+        volume_0 = volume_0[:, :, z_crop_front:]
+        volume_1_aligned = volume_1_aligned[:, :, z_crop_front:]
+        merged_volume = merged_volume[:, :, z_crop_front:]
 
     # Subsample all volumes
     vol0_sub = volume_0[::subsample, ::subsample, ::subsample]

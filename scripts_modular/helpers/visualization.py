@@ -38,14 +38,14 @@ def generate_3d_visualizations(volume_0, step1_results, step2_results, data_dir,
     y_shift = step2_results['y_shift']
     if step3_results and 'y_shift_correction' in step3_results:
         y_shift_correction = step3_results['y_shift_correction']
-        total_y_shift = -(y_shift + y_shift_correction)  # INVERTED
+        total_y_shift = -(y_shift + y_shift_correction) * 2.0  # INVERTED and scaled 2.0x
         print(f"  Y-offset calculation:")
         print(f"    Base Y-shift (Step 2): {y_shift:.2f}")
         print(f"    Y-correction (Step 3): {y_shift_correction:.2f}")
-        print(f"    Total Y-offset (INVERTED): {total_y_shift:.2f}")
+        print(f"    Total Y-offset (INVERTED, 2.0x): {total_y_shift:.2f}")
     else:
-        total_y_shift = -y_shift  # INVERTED
-        print(f"  Y-offset (INVERTED): {total_y_shift:.2f} (no Step 3 correction)")
+        total_y_shift = -y_shift * 2.0  # INVERTED and scaled 2.0x
+        print(f"  Y-offset (INVERTED, 2.0x): {total_y_shift:.2f} (no Step 3 correction)")
 
     # Use provided aligned volume or reconstruct it
     if volume_1_aligned is None:
@@ -143,15 +143,17 @@ def generate_3d_visualizations(volume_0, step1_results, step2_results, data_dir,
         source_labels=source_labels  # Enable color coding
     )
 
-    # Side-by-side comparison
+    # Side-by-side comparison - WITH 2.0x multiplier
     visualize_3d_comparison(
         volume_0,
         volume_1_aligned,
         merged_volume,
         transform_3d,
         output_path=data_dir / '3d_comparison_sidebyside.png',
-        subsample=8,  # Every 8th voxel for good quality/speed balance
-        percentile=75  # Show more tissue
+        subsample=8,
+        percentile=75,
+        z_crop_front=100,
+        z_crop_back=100
     )
 
     # Save merged volume

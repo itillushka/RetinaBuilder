@@ -8,6 +8,13 @@ of all alignment transformations.
 
 import numpy as np
 from scipy import ndimage
+import time
+from .rotation_alignment_parallel import (
+    apply_rotation_z_parallel,
+    shift_volume_parallel,
+    shift_volume_xz_parallel,
+    shift_volume_y_parallel
+)
 
 
 def rotate_volume_around_point(volume, angle_degrees, axes, center_point):
@@ -85,6 +92,8 @@ def apply_all_transformations_to_volume(volume_1_original, step1_results, step2_
     print("APPLYING ALL TRANSFORMATIONS TO ORIGINAL VOLUME_1")
     print("="*70)
 
+    transform_start = time.time()
+
     h, w, d = volume_1_original.shape
     print(f"  Original volume shape: {volume_1_original.shape}")
 
@@ -129,73 +138,77 @@ def apply_all_transformations_to_volume(volume_1_original, step1_results, step2_
                         expand_x_neg:expand_x_neg+w,
                         expand_z_neg:expand_z_neg+d] = volume_1_original
 
-    # Step 1: XZ shift (on expanded canvas, no clipping)
-    print(f"  [1] Applying XZ shift: dx={offset_x}, dz={offset_z}")
-    volume_1_transformed = ndimage.shift(
-        volume_1_transformed,
-        shift=(0, offset_x, offset_z),
-        order=1,
-        mode='constant',
-        cval=0
+    # Step 1: XZ shift (on expanded canvas, no clipping) - PARALLEL
+    print(f"  [1] Applying XZ shift: dx={offset_x}, dz={offset_z} (PARALLEL)")
+    t_start = time.time()
+    volume_1_transformed = shift_volume_xz_parallel(
+        volume_1_transformed, offset_x, offset_z, n_jobs=-1
     )
+    print(f"      ⏱️  {time.time() - t_start:.2f}s")
 
-    # Step 2: Y shift (on expanded canvas, no clipping)
-    print(f"  [2] Applying Y shift: dy={y_shift:.1f}")
-    volume_1_transformed = ndimage.shift(
-        volume_1_transformed,
-        shift=(y_shift, 0, 0),
-        order=1,
-        mode='constant',
-        cval=0
+    # Step 2: Y shift (on expanded canvas, no clipping) - PARALLEL
+    print(f"  [2] Applying Y shift: dy={y_shift:.1f} (PARALLEL)")
+    t_start = time.time()
+    volume_1_transformed = shift_volume_y_parallel(
+        volume_1_transformed, y_shift, n_jobs=-1
     )
+    print(f"      ⏱️  {time.time() - t_start:.2f}s")
 
-    # Step 3: Z-rotation (reshape=False, using pre-expanded canvas)
-    print(f"  [3] Applying Z-rotation: {rotation_angle_z:+.2f}° (reshape=False, pre-expanded canvas)")
-    volume_1_transformed = ndimage.rotate(
+    # Step 3: Z-rotation (reshape=False, using pre-expanded canvas) - PARALLEL
+    print(f"  [3] Applying Z-rotation: {rotation_angle_z:+.2f}° (PARALLEL, pre-expanded canvas)")
+    t_start = time.time()
+    volume_1_transformed = apply_rotation_z_parallel(
         volume_1_transformed,
-        angle=rotation_angle_z,
+        rotation_angle_z,
         axes=(0, 1),  # Y-X plane
-        reshape=False,  # Keep size, use pre-expanded canvas
-        order=1,
-        mode='constant',
-        cval=0
+        n_jobs=-1
     )
+    print(f"      ⏱️  {time.time() - t_start:.2f}s")
 
-    # Step 3.1: Y-shift correction after rotation
+    # Step 3.1: Y-shift correction after rotation - PARALLEL
     if abs(y_shift_correction) > 0.5:
-        print(f"  [3.1] Applying Y-shift correction: {y_shift_correction:+.1f} px")
-        volume_1_transformed = ndimage.shift(
-            volume_1_transformed,
-            shift=(y_shift_correction, 0, 0),
-            order=1,
-            mode='constant',
-            cval=0
+        print(f"  [3.1] Applying Y-shift correction: {y_shift_correction:+.1f} px (PARALLEL)")
+        t_start = time.time()
+        volume_1_transformed = shift_volume_y_parallel(
+            volume_1_transformed, y_shift_correction, n_jobs=-1
         )
+        print(f"      ⏱️  {time.time() - t_start:.2f}s")
 
     # Step 3.5: X-rotation REMOVED (user requested removal)
 
-    # Step 4: Windowed Y-offsets (if available and enabled)
+    # Step 4: Windowed Y-offsets (if available and enabled) - PARALLEL
     if step4_results is not None and 'y_offsets_interpolated' in step4_results:
-        y_offsets = step4_results['y_offsets_interpolated']
-        print(f"  [4] Applying windowed Y-offsets: {len(y_offsets)} B-scans")
+        from joblib import Parallel, delayed
+        import cv2
 
-        # Apply per-B-scan Y shifts
-        volume_1_transformed_windowed = np.zeros_like(volume_1_transformed)
-        for z_idx in range(volume_1_transformed.shape[2]):
+        y_offsets = step4_results['y_offsets_interpolated']
+        print(f"  [4] Applying windowed Y-offsets: {len(y_offsets)} B-scans (PARALLEL)")
+        t_start = time.time()
+
+        def shift_single_bscan_windowed(z_idx, volume, y_offsets):
+            """Apply Y-shift to a single B-scan."""
             if z_idx < len(y_offsets):
                 y_offset = y_offsets[z_idx]
-                bscan_shifted = ndimage.shift(
-                    volume_1_transformed[:, :, z_idx],
-                    shift=(y_offset, 0),
-                    order=1,
-                    mode='constant',
-                    cval=0
-                )
-                volume_1_transformed_windowed[:, :, z_idx] = bscan_shifted
+                bscan = volume[:, :, z_idx]
+                # Use OpenCV for faster shifting
+                M = np.float32([[1, 0, 0], [0, 1, y_offset]])
+                H, W = bscan.shape
+                shifted = cv2.warpAffine(bscan, M, (W, H),
+                                        flags=cv2.INTER_LINEAR,
+                                        borderMode=cv2.BORDER_CONSTANT,
+                                        borderValue=0)
+                return shifted
             else:
-                volume_1_transformed_windowed[:, :, z_idx] = volume_1_transformed[:, :, z_idx]
+                return volume[:, :, z_idx]
 
-        volume_1_transformed = volume_1_transformed_windowed
+        # Apply per-B-scan Y shifts in parallel
+        shifted_bscans = Parallel(n_jobs=-1, backend='threading', verbose=0)(
+            delayed(shift_single_bscan_windowed)(z, volume_1_transformed, y_offsets)
+            for z in range(volume_1_transformed.shape[2])
+        )
+
+        volume_1_transformed = np.stack(shifted_bscans, axis=2)
+        print(f"      ⏱️  {time.time() - t_start:.2f}s")
 
     # Crop padding back to tissue bounds
     print(f"\n  [4] Cropping padding to tissue bounds...")
@@ -215,9 +228,12 @@ def apply_all_transformations_to_volume(volume_1_original, step1_results, step2_
         ]
         print(f"      After cropping: {volume_1_transformed.shape}")
 
+    transform_time = time.time() - transform_start
+
     print(f"\n  [OK] All transformations applied successfully!")
     print(f"  [OK] Final volume shape: {volume_1_transformed.shape}")
     print(f"  [OK] NO DATA LOSS - Canvas expanded during transformations, then cropped to tissue")
+    print(f"\n  ⏱️  TOTAL TRANSFORMATION TIME: {transform_time:.2f}s")
     print("="*70)
 
     return volume_1_transformed

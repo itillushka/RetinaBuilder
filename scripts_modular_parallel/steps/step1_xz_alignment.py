@@ -12,6 +12,7 @@ import sys
 # Add parent directories to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from helpers.mip_generation import create_vessel_enhanced_mip, register_mip_phase_correlation
+from helpers.rotation_alignment_parallel import shift_volume_xz_parallel
 
 
 def perform_xz_alignment(ref_volume, mov_volume):
@@ -38,10 +39,9 @@ def perform_xz_alignment(ref_volume, mov_volume):
     # Run phase correlation
     (offset_x, offset_z), confidence, correlation_map = register_mip_phase_correlation(mip_v0, mip_v1)
 
-    # Apply shift
-    volume_1_xz_aligned = ndimage.shift(
-        mov_volume, shift=(0, offset_x, offset_z),
-        order=1, mode='constant', cval=0
+    # Apply shift using PARALLEL method
+    volume_1_xz_aligned = shift_volume_xz_parallel(
+        mov_volume, offset_x, offset_z, n_jobs=-1
     )
 
     return {
@@ -108,11 +108,10 @@ def step1_xz_alignment(volume_0, volume_1, data_dir):
     print(f"    Offset Z: {offset_z} pixels")
     print(f"    Confidence: {confidence:.2f}")
 
-    # Apply shift
-    print("  Applying XZ shift...")
-    volume_1_xz_aligned = ndimage.shift(
-        volume_1, shift=(0, offset_x, offset_z),
-        order=1, mode='constant', cval=0
+    # Apply shift using PARALLEL method
+    print("  Applying XZ shift (PARALLEL)...")
+    volume_1_xz_aligned = shift_volume_xz_parallel(
+        volume_1, offset_x, offset_z, n_jobs=-1
     )
 
     # Calculate overlap bounds

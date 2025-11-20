@@ -19,6 +19,7 @@ from helpers.rotation_alignment import (
     detect_contour_surface,
     calculate_ncc
 )
+from helpers.rotation_alignment_parallel import shift_volume_y_parallel
 
 
 def _test_single_y_offset(offset, b0_norm, b1_norm, Y):
@@ -168,10 +169,10 @@ def perform_y_alignment(ref_volume, mov_volume):
     # Use contour offset as primary (more reliable for surface alignment)
     y_shift = contour_offset
 
-    # Apply Y-shift to full volume (NO 2.0x multiplier - that's only for visualization)
-    volume_1_y_aligned = ndimage.shift(
-        mov_volume, shift=(y_shift, 0, 0),
-        order=1, mode='constant', cval=0
+    # Apply Y-shift to full volume using PARALLEL method
+    # (NO 2.0x multiplier - that's only for visualization)
+    volume_1_y_aligned = shift_volume_y_parallel(
+        mov_volume, y_shift, n_jobs=-1
     )
 
     return {
@@ -252,12 +253,11 @@ def step2_y_alignment(step1_results, data_dir):
     # Use contour offset as primary (directly aligns retinal surfaces)
     y_shift = contour_offset
 
-    print(f"\n5. Applying Y-shift: {y_shift:+.2f} px...")
+    print(f"\n5. Applying Y-shift: {y_shift:+.2f} px (PARALLEL)...")
 
-    # Apply Y shift
-    overlap_v1_y_aligned = ndimage.shift(
-        overlap_v1, shift=(y_shift, 0, 0),
-        order=1, mode='constant', cval=0
+    # Apply Y shift using PARALLEL method
+    overlap_v1_y_aligned = shift_volume_y_parallel(
+        overlap_v1, y_shift, n_jobs=-1
     )
     print(f"   [OK] Applied Y-shift to full overlap volume")
 

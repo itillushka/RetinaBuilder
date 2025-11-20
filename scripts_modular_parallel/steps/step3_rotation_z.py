@@ -21,6 +21,10 @@ try:
         find_optimal_y_shift_central_bscan,
         visualize_contour_y_alignment
     )
+    from helpers.rotation_alignment_parallel import (
+        apply_rotation_z_parallel,
+        shift_volume_y_parallel
+    )
     ROTATION_AVAILABLE = True
 except ImportError:
     ROTATION_AVAILABLE = False
@@ -164,12 +168,13 @@ def step3_rotation_z(step1_results, step2_results, data_dir, visualize=False):
 
     correlation_optimal = rotation_metrics['optimal_correlation']
 
-    # Apply rotation
-    print(f"\n3. Applying rotation: {rotation_angle:+.2f}°...")
-    overlap_v1_rotated = apply_rotation_z(
+    # Apply rotation using PARALLEL OpenCV-based method
+    print(f"\n3. Applying rotation: {rotation_angle:+.2f}° (PARALLEL)...")
+    overlap_v1_rotated = apply_rotation_z_parallel(
         overlap_v1_y_aligned,
         rotation_angle,
-        axes=(0, 1)
+        axes=(0, 1),
+        n_jobs=-1  # Use all CPU cores
     )
 
     # Step 3.1: Y-axis re-alignment on central B-scan (fine-tuning)
@@ -199,15 +204,13 @@ def step3_rotation_z(step1_results, step2_results, data_dir, visualize=False):
             output_path=data_dir / 'step3_1_contour_y_alignment.png'
         )
 
-    # Apply Y-shift correction if significant
+    # Apply Y-shift correction if significant using PARALLEL method
     if abs(y_shift_correction) > 0.5:
-        print(f"\n  Applying Y correction: {y_shift_correction:+.1f} px")
-        overlap_v1_rotated = ndimage.shift(
+        print(f"\n  Applying Y correction: {y_shift_correction:+.1f} px (PARALLEL)")
+        overlap_v1_rotated = shift_volume_y_parallel(
             overlap_v1_rotated,
-            shift=(y_shift_correction, 0, 0),
-            order=1,
-            mode='constant',
-            cval=0
+            y_shift_correction,
+            n_jobs=-1  # Use all CPU cores
         )
     else:
         print(f"\n  No significant Y correction needed ({y_shift_correction:+.1f} px < 0.5 px threshold)")

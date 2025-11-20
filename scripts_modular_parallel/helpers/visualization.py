@@ -38,14 +38,14 @@ def generate_3d_visualizations(volume_0, step1_results, step2_results, data_dir,
     y_shift = step2_results['y_shift']
     if step3_results and 'y_shift_correction' in step3_results:
         y_shift_correction = step3_results['y_shift_correction']
-        total_y_shift = -(y_shift + y_shift_correction) * 2.0  # INVERTED and scaled 2.0x
+        total_y_shift = (y_shift + y_shift_correction)  # Use actual shift value
         print(f"  Y-offset calculation:")
         print(f"    Base Y-shift (Step 2): {y_shift:.2f}")
         print(f"    Y-correction (Step 3): {y_shift_correction:.2f}")
-        print(f"    Total Y-offset (INVERTED, 2.0x): {total_y_shift:.2f}")
+        print(f"    Total Y-offset: {total_y_shift:.2f}")
     else:
-        total_y_shift = -y_shift * 2.0  # INVERTED and scaled 2.0x
-        print(f"  Y-offset (INVERTED, 2.0x): {total_y_shift:.2f} (no Step 3 correction)")
+        total_y_shift = y_shift  # Use actual shift value
+        print(f"  Y-offset: {total_y_shift:.2f} (no Step 3 correction)")
 
     # Use provided aligned volume or reconstruct it
     if volume_1_aligned is None:

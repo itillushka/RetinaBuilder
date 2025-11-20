@@ -15,7 +15,7 @@ import numpy as np
 import argparse
 from pathlib import Path
 import time
-from concurrent.futures import ThreadPoolExecutor
+from multiprocessing import Process, freeze_support
 
 # Set up parent directory path
 parent_dir = Path(__file__).parent.parent
@@ -36,6 +36,28 @@ from helpers import (
     OCTVolumeLoader
 )
 from helpers.step_visualization import visualize_all_steps
+
+
+def _visualize_all_steps_process(volume_0, step1_results, step2_results, step3_results, data_dir):
+    """
+    Wrapper for visualize_all_steps to run in separate process.
+
+    Each process gets its own matplotlib instance, avoiding threading issues.
+    """
+    import matplotlib
+    matplotlib.use('Agg')  # Set backend in this process
+    visualize_all_steps(volume_0, step1_results, step2_results, step3_results, data_dir)
+
+
+def _generate_visualizations_process(volume_0, volume_1, step1_results, step2_results, step3_results, data_dir):
+    """
+    Wrapper for generate_visualizations to run in separate process.
+
+    Each process gets its own matplotlib instance, avoiding threading issues.
+    """
+    import matplotlib
+    matplotlib.use('Agg')  # Set backend in this process
+    generate_visualizations(volume_0, volume_1, step1_results, step2_results, step3_results, data_dir)
 
 
 def main():
@@ -212,27 +234,29 @@ Examples:
             print(f"  [SAVED] step3_results.npy")
             print(f"⏱️  Step 3 time: {step3_time:.2f} seconds")
 
-    # Generate visualizations if requested (IN PARALLEL)
+    # Generate visualizations if requested (IN PARALLEL using multiprocessing)
     if args.visual and step1_results and step2_results:
         viz_start = time.time()
-        print("\n🎨 Generating visualizations in PARALLEL...")
+        print("\n🎨 Generating visualizations in PARALLEL (multiprocessing)...")
 
-        # Run both visualization functions in parallel using threads
-        # (matplotlib operations release GIL, so threading works well)
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            # Submit both visualization tasks
-            future_steps = executor.submit(
-                visualize_all_steps,
-                volume_0, step1_results, step2_results, step3_results, data_dir
-            )
-            future_3d = executor.submit(
-                generate_visualizations,
-                volume_0, volume_1, step1_results, step2_results, step3_results, data_dir
-            )
+        # Create separate processes for each visualization task
+        # Each process has its own Python interpreter and matplotlib instance
+        process1 = Process(
+            target=_visualize_all_steps_process,
+            args=(volume_0, step1_results, step2_results, step3_results, data_dir)
+        )
+        process2 = Process(
+            target=_generate_visualizations_process,
+            args=(volume_0, volume_1, step1_results, step2_results, step3_results, data_dir)
+        )
 
-            # Wait for completion
-            future_steps.result()
-            future_3d.result()
+        # Start both processes
+        process1.start()
+        process2.start()
+
+        # Wait for both to complete
+        process1.join()
+        process2.join()
 
         viz_time = time.time() - viz_start
         timing_results['visualization'] = viz_time
@@ -334,23 +358,26 @@ def handle_visual_only_mode(oct_data_dir, data_dir, patient_id):
     step3_results = np.load(data_dir / 'step3_results.npy', allow_pickle=True).item()
     print(f"  [OK] Loaded alignment results")
 
-    # Generate visualizations IN PARALLEL
-    print("\n🎨 Generating visualizations in PARALLEL...")
+    # Generate visualizations IN PARALLEL using multiprocessing
+    print("\n🎨 Generating visualizations in PARALLEL (multiprocessing)...")
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        # Submit both visualization tasks
-        future_steps = executor.submit(
-            visualize_all_steps,
-            volume_0, step1_results, step2_results, step3_results, data_dir
-        )
-        future_3d = executor.submit(
-            generate_visualizations,
-            volume_0, volume_1, step1_results, step2_results, step3_results, data_dir
-        )
+    # Create separate processes for each visualization task
+    process1 = Process(
+        target=_visualize_all_steps_process,
+        args=(volume_0, step1_results, step2_results, step3_results, data_dir)
+    )
+    process2 = Process(
+        target=_generate_visualizations_process,
+        args=(volume_0, volume_1, step1_results, step2_results, step3_results, data_dir)
+    )
 
-        # Wait for completion
-        future_steps.result()
-        future_3d.result()
+    # Start both processes
+    process1.start()
+    process2.start()
+
+    # Wait for both to complete
+    process1.join()
+    process2.join()
 
     print("\n" + "="*70)
     print("✅ VISUALIZATION COMPLETE!")
@@ -358,22 +385,23 @@ def handle_visual_only_mode(oct_data_dir, data_dir, patient_id):
 
 
 def generate_visualizations(volume_0, volume_1, step1_results, step2_results, step3_results, data_dir):
-    """Generate 3D visualizations."""
+    """Generate 3D visualizations with full transformation applied (PARALLEL)."""
 
-    # Apply all transformations to original volume_1
-    # Step 3.5 (X-rotation) removed as per user request
+    print("\n  Applying all transformations to volume_1 for visualization...")
+
+    # Apply ALL transformations (XZ, Y, rotation) to get properly aligned volume
+    # This is necessary because Step 3 applies rotation which must be in the data
     volume_1_aligned = apply_all_transformations_to_volume(
         volume_1,
         step1_results,
         step2_results,
-        step3_results,
-        step3_5_results=None,  # Step 3.5 disabled
-        step4_results=None
+        step3_results
     )
 
-    # Generate 3D visualizations
+    # Generate 3D visualizations with the fully transformed volume
     generate_3d_visualizations(volume_0, step1_results, step2_results, data_dir, step3_results=step3_results, volume_1_aligned=volume_1_aligned)
 
 
 if __name__ == '__main__':
+    freeze_support()  # Required for Windows multiprocessing
     main()

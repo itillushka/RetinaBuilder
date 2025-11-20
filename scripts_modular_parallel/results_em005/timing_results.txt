@@ -1,11 +1,12 @@
 OCT ALIGNMENT PIPELINE - TIMING RESULTS
 ======================================================================
 
-Volume Loading:       16.44s
-Step 1 (XZ):          13.75s
-Step 2 (Y):           20.67s
-Step 3 (Rotation):    55.43s
+Volume Loading:       13.16s
+Step 1 (XZ):           6.27s
+Step 2 (Y):           11.26s
+Step 3 (Rotation):    42.15s
+Visualization:       117.07s
 ──────────────────────────────
-TOTAL TIME:          115.67s (1.9 min)
+TOTAL TIME:          197.33s (3.3 min)
 
 ======================================================================

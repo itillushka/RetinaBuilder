@@ -102,7 +102,7 @@ def perform_z_rotation_alignment(ref_volume, mov_volume, visualize=False, positi
     }
 
 
-def step3_rotation_z(step1_results, step2_results, data_dir):
+def step3_rotation_z(step1_results, step2_results, data_dir, visualize=False):
     """
     Step 3: Z-axis rotation alignment (in-plane XY rotation) + Y-axis re-alignment.
 
@@ -113,6 +113,7 @@ def step3_rotation_z(step1_results, step2_results, data_dir):
         step1_results: Dictionary from step1_xz_alignment
         step2_results: Dictionary from step2_y_alignment
         data_dir: Path to data directory for saving results
+        visualize: Whether to generate visualizations (default: False)
 
     Returns:
         results: Dictionary containing:
@@ -145,6 +146,10 @@ def step3_rotation_z(step1_results, step2_results, data_dir):
 
     # Find optimal rotation angle
     print("\n2. Finding optimal rotation angle...")
+
+    # Only generate mask visualization if visualize flag is set
+    mask_vis_path = data_dir / 'step3_mask_verification.png' if visualize else None
+
     rotation_angle, rotation_metrics = find_optimal_rotation_z(
         overlap_v0,
         overlap_v1_y_aligned,
@@ -153,8 +158,8 @@ def step3_rotation_z(step1_results, step2_results, data_dir):
         fine_range=3,
         fine_step=0.5,
         verbose=True,
-        visualize_masks=True,
-        mask_vis_path=data_dir / 'step3_mask_verification.png'
+        visualize_masks=visualize,
+        mask_vis_path=mask_vis_path
     )
 
     correlation_optimal = rotation_metrics['optimal_correlation']
@@ -177,21 +182,22 @@ def step3_rotation_z(step1_results, step2_results, data_dir):
         verbose=True
     )
 
-    # Create visualization for Step 3.1
-    print(f"\n  Creating Step 3.1 visualization...")
-    vis_data = y_shift_results[0]  # Get visualization data from results
-    visualize_contour_y_alignment(
-        bscan_v0=vis_data['bscan_v0'],
-        bscan_v1=vis_data['bscan_v1'],
-        bscan_v0_denoised=vis_data['bscan_v0_denoised'],
-        bscan_v1_denoised=vis_data['bscan_v1_denoised'],
-        surface_v0=vis_data['surface_v0'],
-        surface_v1=vis_data['surface_v1'],
-        y_shift=y_shift_correction,
-        ncc_score=y_shift_ncc,
-        confidence=vis_data['confidence'],
-        output_path=data_dir / 'step3_1_contour_y_alignment.png'
-    )
+    # Create visualization for Step 3.1 only if requested
+    if visualize:
+        print(f"\n  Creating Step 3.1 visualization...")
+        vis_data = y_shift_results[0]  # Get visualization data from results
+        visualize_contour_y_alignment(
+            bscan_v0=vis_data['bscan_v0'],
+            bscan_v1=vis_data['bscan_v1'],
+            bscan_v0_denoised=vis_data['bscan_v0_denoised'],
+            bscan_v1_denoised=vis_data['bscan_v1_denoised'],
+            surface_v0=vis_data['surface_v0'],
+            surface_v1=vis_data['surface_v1'],
+            y_shift=y_shift_correction,
+            ncc_score=y_shift_ncc,
+            confidence=vis_data['confidence'],
+            output_path=data_dir / 'step3_1_contour_y_alignment.png'
+        )
 
     # Apply Y-shift correction if significant
     if abs(y_shift_correction) > 0.5:

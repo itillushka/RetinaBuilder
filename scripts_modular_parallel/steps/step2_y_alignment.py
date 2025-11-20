@@ -9,6 +9,8 @@ import numpy as np
 from scipy import ndimage
 from pathlib import Path
 import sys
+from multiprocessing import Pool, cpu_count
+from functools import partial
 
 # Add parent directories to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -17,6 +19,39 @@ from helpers.rotation_alignment import (
     detect_contour_surface,
     calculate_ncc
 )
+
+
+def _test_single_y_offset(offset, b0_norm, b1_norm, Y):
+    """
+    Worker function to test a single Y-offset.
+
+    Args:
+        offset: Y-offset to test
+        b0_norm: Normalized reference B-scan
+        b1_norm: Normalized moving B-scan
+        Y: Height of B-scans
+
+    Returns:
+        NCC score for this offset
+    """
+    try:
+        # Determine overlap region after shifting
+        if offset >= 0:
+            # V1 shifted down
+            b1_crop = b1_norm[0:Y-offset, :]
+            b0_crop = b0_norm[offset:Y, :]
+        else:
+            # V1 shifted up
+            b1_crop = b1_norm[-offset:Y, :]
+            b0_crop = b0_norm[0:Y+offset, :]
+
+        # Calculate NCC
+        if b0_crop.shape == b1_crop.shape and b0_crop.size > 0:
+            return calculate_ncc(b0_crop, b1_crop)
+        else:
+            return -1.0  # Invalid
+    except Exception:
+        return -1.0
 
 
 def ncc_search_y_offset(bscan_v0, bscan_v1, search_range=50):
@@ -48,25 +83,18 @@ def ncc_search_y_offset(bscan_v0, bscan_v1, search_range=50):
 
     # Search range
     offsets = np.arange(-search_range, search_range + 1)
-    ncc_scores = np.zeros(len(offsets))
 
-    for i, offset in enumerate(offsets):
-        # Determine overlap region after shifting
-        if offset >= 0:
-            # V1 shifted down
-            b1_crop = b1_norm[0:Y-offset, :]
-            b0_crop = b0_norm[offset:Y, :]
-        else:
-            # V1 shifted up
-            b1_crop = b1_norm[-offset:Y, :]
-            b0_crop = b0_norm[0:Y+offset, :]
+    # PARALLEL PROCESSING: Test all offsets in parallel
+    num_workers = min(cpu_count(), len(offsets))
 
-        # Calculate NCC
-        if b0_crop.shape == b1_crop.shape and b0_crop.size > 0:
-            ncc = calculate_ncc(b0_crop, b1_crop)
-            ncc_scores[i] = ncc
-        else:
-            ncc_scores[i] = -1  # Invalid
+    with Pool(processes=num_workers) as pool:
+        test_func = partial(
+            _test_single_y_offset,
+            b0_norm=b0_norm,
+            b1_norm=b1_norm,
+            Y=Y
+        )
+        ncc_scores = np.array(pool.map(test_func, offsets))
 
     # Find best offset
     best_idx = np.argmax(ncc_scores)

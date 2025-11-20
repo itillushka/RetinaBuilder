@@ -14,6 +14,8 @@ Usage:
 import numpy as np
 import argparse
 from pathlib import Path
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 # Set up parent directory path
 parent_dir = Path(__file__).parent.parent
@@ -111,8 +113,12 @@ Examples:
     data_dir = Path(__file__).parent / f'results_{patient_safe.lower()}'
     data_dir.mkdir(exist_ok=True)
 
+    # Start total pipeline timer
+    pipeline_start = time.time()
+    timing_results = {}
+
     print("="*70)
-    print("OCT VOLUME ALIGNMENT PIPELINE - MODULAR ARCHITECTURE")
+    print("OCT VOLUME ALIGNMENT PIPELINE - MODULAR ARCHITECTURE (PARALLEL)")
     print("="*70)
     print(f"Data directory: {data_dir}")
     print(f"OCT data directory: {oct_data_dir}")
@@ -127,6 +133,7 @@ Examples:
     print("LOADING OCT VOLUMES")
     print("="*70)
 
+    loading_start = time.time()
     processor = OCTImageProcessor(sidebar_width=250, crop_top=100, crop_bottom=50)
     loader = OCTVolumeLoader(processor)
 
@@ -153,24 +160,39 @@ Examples:
     print(f"  V0 shape: {volume_0.shape}")
     print(f"  V1 shape: {volume_1.shape}")
 
+    loading_time = time.time() - loading_start
+    timing_results['loading'] = loading_time
+    print(f"\n⏱️  Volume loading time: {loading_time:.2f} seconds")
+
     # Initialize results
     step1_results = None
     step2_results = None
     step3_results = None
 
-    # Execute steps
+    # Execute steps with timing
     for step_num in steps_to_run:
         if step_num == 1:
+            step1_start = time.time()
             step1_results = step1_xz_alignment(volume_0, volume_1, data_dir)
+            step1_time = time.time() - step1_start
+            timing_results['step1'] = step1_time
+
             np.save(data_dir / 'step1_results.npy', step1_results)
             print(f"  [SAVED] step1_results.npy")
+            print(f"⏱️  Step 1 time: {step1_time:.2f} seconds")
 
         elif step_num == 2:
             if step1_results is None:
                 step1_results = np.load(data_dir / 'step1_results.npy', allow_pickle=True).item()
+
+            step2_start = time.time()
             step2_results = step2_y_alignment(step1_results, data_dir)
+            step2_time = time.time() - step2_start
+            timing_results['step2'] = step2_time
+
             np.save(data_dir / 'step2_results.npy', step2_results)
             print(f"  [SAVED] step2_results.npy")
+            print(f"⏱️  Step 2 time: {step2_time:.2f} seconds")
 
         elif step_num == 3:
             if step1_results is None:
@@ -179,24 +201,86 @@ Examples:
                 step2_results = np.load(data_dir / 'step2_results.npy', allow_pickle=True).item()
 
             # Run Step 3 (Z-rotation)
-            step3_results = step3_rotation_z(step1_results, step2_results, data_dir)
+            step3_start = time.time()
+            step3_results = step3_rotation_z(step1_results, step2_results, data_dir, visualize=args.visual)
+            step3_time = time.time() - step3_start
+            timing_results['step3'] = step3_time
 
             # Step 3.5 (X-rotation) REMOVED - was causing incorrect alignment
 
             np.save(data_dir / 'step3_results.npy', step3_results)
             print(f"  [SAVED] step3_results.npy")
+            print(f"⏱️  Step 3 time: {step3_time:.2f} seconds")
 
-    # Generate visualizations if requested
+    # Generate visualizations if requested (IN PARALLEL)
     if args.visual and step1_results and step2_results:
-        # Generate step-by-step YZ views
-        visualize_all_steps(volume_0, step1_results, step2_results, step3_results, data_dir)
+        viz_start = time.time()
+        print("\n🎨 Generating visualizations in PARALLEL...")
 
-        # Generate 3D visualizations
-        generate_visualizations(volume_0, volume_1, step1_results, step2_results, step3_results, data_dir)
+        # Run both visualization functions in parallel using threads
+        # (matplotlib operations release GIL, so threading works well)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            # Submit both visualization tasks
+            future_steps = executor.submit(
+                visualize_all_steps,
+                volume_0, step1_results, step2_results, step3_results, data_dir
+            )
+            future_3d = executor.submit(
+                generate_visualizations,
+                volume_0, volume_1, step1_results, step2_results, step3_results, data_dir
+            )
 
+            # Wait for completion
+            future_steps.result()
+            future_3d.result()
+
+        viz_time = time.time() - viz_start
+        timing_results['visualization'] = viz_time
+        print(f"⏱️  Visualization time: {viz_time:.2f} seconds")
+
+    # Calculate total time
+    total_time = time.time() - pipeline_start
+    timing_results['total'] = total_time
+
+    # Print timing summary
     print("\n" + "="*70)
     print("✅ PIPELINE COMPLETE!")
     print("="*70)
+    print("\n⏱️  TIMING SUMMARY:")
+    print("="*70)
+    if 'loading' in timing_results:
+        print(f"  Volume Loading:    {timing_results['loading']:>8.2f}s")
+    if 'step1' in timing_results:
+        print(f"  Step 1 (XZ):       {timing_results['step1']:>8.2f}s")
+    if 'step2' in timing_results:
+        print(f"  Step 2 (Y):        {timing_results['step2']:>8.2f}s")
+    if 'step3' in timing_results:
+        print(f"  Step 3 (Rotation): {timing_results['step3']:>8.2f}s")
+    if 'visualization' in timing_results:
+        print(f"  Visualization:     {timing_results['visualization']:>8.2f}s")
+    print(f"  {'─'*30}")
+    print(f"  TOTAL TIME:        {total_time:>8.2f}s ({total_time/60:.1f} min)")
+    print("="*70)
+
+    # Save timing results as human-readable text file
+    timing_file = data_dir / 'timing_results.txt'
+    with open(timing_file, 'w', encoding='utf-8') as f:
+        f.write("OCT ALIGNMENT PIPELINE - TIMING RESULTS\n")
+        f.write("="*70 + "\n\n")
+        if 'loading' in timing_results:
+            f.write(f"Volume Loading:    {timing_results['loading']:>8.2f}s\n")
+        if 'step1' in timing_results:
+            f.write(f"Step 1 (XZ):       {timing_results['step1']:>8.2f}s\n")
+        if 'step2' in timing_results:
+            f.write(f"Step 2 (Y):        {timing_results['step2']:>8.2f}s\n")
+        if 'step3' in timing_results:
+            f.write(f"Step 3 (Rotation): {timing_results['step3']:>8.2f}s\n")
+        if 'visualization' in timing_results:
+            f.write(f"Visualization:     {timing_results['visualization']:>8.2f}s\n")
+        f.write("─"*30 + "\n")
+        f.write(f"TOTAL TIME:        {total_time:>8.2f}s ({total_time/60:.1f} min)\n")
+        f.write("\n" + "="*70 + "\n")
+    print(f"\n[SAVED] timing_results.txt")
 
 
 def handle_visual_only_mode(oct_data_dir, data_dir, patient_id):
@@ -250,11 +334,23 @@ def handle_visual_only_mode(oct_data_dir, data_dir, patient_id):
     step3_results = np.load(data_dir / 'step3_results.npy', allow_pickle=True).item()
     print(f"  [OK] Loaded alignment results")
 
-    # Generate step-by-step YZ views
-    visualize_all_steps(volume_0, step1_results, step2_results, step3_results, data_dir)
+    # Generate visualizations IN PARALLEL
+    print("\n🎨 Generating visualizations in PARALLEL...")
 
-    # Generate 3D visualizations
-    generate_visualizations(volume_0, volume_1, step1_results, step2_results, step3_results, data_dir)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        # Submit both visualization tasks
+        future_steps = executor.submit(
+            visualize_all_steps,
+            volume_0, step1_results, step2_results, step3_results, data_dir
+        )
+        future_3d = executor.submit(
+            generate_visualizations,
+            volume_0, volume_1, step1_results, step2_results, step3_results, data_dir
+        )
+
+        # Wait for completion
+        future_steps.result()
+        future_3d.result()
 
     print("\n" + "="*70)
     print("✅ VISUALIZATION COMPLETE!")

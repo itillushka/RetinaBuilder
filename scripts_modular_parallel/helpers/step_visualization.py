@@ -271,3 +271,95 @@ def visualize_all_steps(volume_0, step1_results, step2_results, step3_results, o
 
     print("\n✓ Step-by-step YZ visualizations complete!")
     print("="*70)
+
+
+def visualize_three_volume_mips(volume_1, volume_2_aligned, volume_3_aligned_final,
+                                 merged_v1_v2, final_merged, output_dir):
+    """
+    Generate MIP visualizations for three-volume alignment pipeline.
+
+    Creates Maximum Intensity Projections (MIPs) along all three axes
+    for individual volumes and merged results.
+
+    Args:
+        volume_1: Original reference volume (Y, X, Z)
+        volume_2_aligned: Volume 2 with transformations applied (Y, X, Z)
+        volume_3_aligned_final: Volume 3 with combined transformations (Y, X, Z)
+        merged_v1_v2: Intermediate merge (V1+V2) (Y, X, Z)
+        final_merged: Final merge (V1+V2+V3) (Y, X, Z)
+        output_dir: Directory to save visualizations
+
+    Generates:
+        - MIP projections for 5 volumes × 3 axes = 15 images
+        - Saved as: three_volume_mips_all_projections.png
+    """
+    print("\n" + "="*70)
+    print("GENERATING MIP VISUALIZATIONS")
+    print("="*70)
+
+    # Define volumes to visualize (in order of progressive alignment)
+    volumes = [
+        ('V1\n(Reference)', volume_1),
+        ('V2\n(Aligned)', volume_2_aligned),
+        ('V3\n(Aligned)', volume_3_aligned_final),
+        ('Merged\nV1+V2', merged_v1_v2),
+        ('Final\nV1+V2+V3', final_merged)
+    ]
+
+    # Define projections (name, axis, axis labels)
+    projections = [
+        ('XY (En-face/Top)', 0, 'Width (X) →', 'Depth (Z) →'),  # Max along Y
+        ('YZ (Sagittal/Side)', 1, 'Height (Y) →', 'Depth (Z) →'),  # Max along X
+        ('XZ (Coronal/Front)', 2, 'Width (X) →', 'Height (Y) →')  # Max along Z
+    ]
+
+    # Create figure (3 rows × 5 columns)
+    fig, axes = plt.subplots(3, 5, figsize=(25, 15))
+
+    print("\n  Generating MIPs...")
+
+    for row, (proj_name, axis, xlabel, ylabel) in enumerate(projections):
+        print(f"    Row {row+1}/3: {proj_name}...")
+
+        for col, (vol_name, volume) in enumerate(volumes):
+            # Generate MIP along specified axis
+            mip = np.max(volume, axis=axis)
+
+            # Normalize for visualization (0-1 range)
+            mip_norm = (mip - mip.min()) / (mip.max() - mip.min() + 1e-8)
+
+            # Display
+            axes[row, col].imshow(mip_norm, cmap='gray', aspect='auto', origin='lower')
+            axes[row, col].set_title(f'{vol_name}\n{proj_name}',
+                                     fontweight='bold', fontsize=10)
+            axes[row, col].set_xlabel(xlabel, fontsize=8)
+            axes[row, col].set_ylabel(ylabel, fontsize=8)
+            axes[row, col].tick_params(labelsize=7)
+
+            # Add grid for easier spatial reference
+            axes[row, col].grid(True, alpha=0.2, linewidth=0.5)
+
+            # Add shape info as text annotation
+            shape_text = f'{mip.shape[0]}×{mip.shape[1]}'
+            axes[row, col].text(0.02, 0.98, shape_text,
+                               transform=axes[row, col].transAxes,
+                               fontsize=7, color='yellow',
+                               verticalalignment='top',
+                               bbox=dict(boxstyle='round', facecolor='black', alpha=0.5))
+
+    # Overall title
+    plt.suptitle('Three-Volume Progressive Alignment: MIP Projections\n' +
+                 'Shows alignment quality and coverage expansion across all axes',
+                 fontsize=16, fontweight='bold', y=0.995)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.99])
+
+    # Save
+    output_path = Path(output_dir) / 'three_volume_mips_all_projections.png'
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+    print(f"\n  ✓ Saved: {output_path.name}")
+    print(f"  ✓ Size: 25×15 inches @ 150 DPI")
+    print(f"  ✓ Grid: 3 projections × 5 volumes = 15 MIP images")
+    print("="*70)

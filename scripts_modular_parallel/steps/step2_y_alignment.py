@@ -9,8 +9,9 @@ import numpy as np
 from scipy import ndimage
 from pathlib import Path
 import sys
-from multiprocessing import Pool, cpu_count
+from multiprocessing import cpu_count
 from functools import partial
+from concurrent.futures import ThreadPoolExecutor
 
 # Add parent directories to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -86,16 +87,17 @@ def ncc_search_y_offset(bscan_v0, bscan_v1, search_range=50):
     offsets = np.arange(-search_range, search_range + 1)
 
     # PARALLEL PROCESSING: Test all offsets in parallel
+    # Use ThreadPoolExecutor instead of multiprocessing to avoid memory issues
     num_workers = min(cpu_count(), len(offsets))
 
-    with Pool(processes=num_workers) as pool:
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
         test_func = partial(
             _test_single_y_offset,
             b0_norm=b0_norm,
             b1_norm=b1_norm,
             Y=Y
         )
-        ncc_scores = np.array(pool.map(test_func, offsets))
+        ncc_scores = np.array(list(executor.map(test_func, offsets)))
 
     # Find best offset
     best_idx = np.argmax(ncc_scores)

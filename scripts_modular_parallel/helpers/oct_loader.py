@@ -25,7 +25,6 @@ Author: OCT Volumetric Specialist
 import os
 import glob
 import numpy as np
-import pyvista as pv
 from PIL import Image
 import re
 from typing import Optional, Tuple
@@ -33,6 +32,14 @@ import logging
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import cpu_count
+
+# Lazy import for pyvista (only needed for VTK visualization, not alignment)
+try:
+    import pyvista as pv
+    HAS_PYVISTA = True
+except ImportError:
+    HAS_PYVISTA = False
+    pv = None
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

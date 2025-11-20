@@ -15,7 +15,7 @@ from helpers.mip_generation import create_vessel_enhanced_mip, register_mip_phas
 from helpers.rotation_alignment_parallel import shift_volume_xz_parallel
 
 
-def perform_xz_alignment(ref_volume, mov_volume):
+def perform_xz_alignment(ref_volume, mov_volume, max_offset_x=None, max_offset_z=None):
     """
     XZ-alignment wrapper for multi-volume stitcher compatibility.
 
@@ -25,6 +25,8 @@ def perform_xz_alignment(ref_volume, mov_volume):
     Args:
         ref_volume: Reference volume (Y, X, Z)
         mov_volume: Volume to align (Y, X, Z)
+        max_offset_x: Maximum allowed X-axis offset (±pixels). None = no limit.
+        max_offset_z: Maximum allowed Z-axis offset (±pixels). None = no limit.
 
     Returns:
         dict containing:
@@ -36,8 +38,12 @@ def perform_xz_alignment(ref_volume, mov_volume):
     mip_v0 = create_vessel_enhanced_mip(ref_volume)
     mip_v1 = create_vessel_enhanced_mip(mov_volume)
 
-    # Run phase correlation
-    (offset_x, offset_z), confidence, correlation_map = register_mip_phase_correlation(mip_v0, mip_v1)
+    # Run phase correlation with constraints
+    (offset_x, offset_z), confidence, correlation_map = register_mip_phase_correlation(
+        mip_v0, mip_v1,
+        max_offset_x=max_offset_x,
+        max_offset_z=max_offset_z
+    )
 
     # Apply shift using PARALLEL method
     volume_1_xz_aligned = shift_volume_xz_parallel(

@@ -73,7 +73,7 @@ def create_vessel_enhanced_mip(volume, verbose=True):
     return vessels_final
 
 
-def register_mip_phase_correlation(mip1, mip2):
+def register_mip_phase_correlation(mip1, mip2, max_offset_x=None, max_offset_z=None):
     """
     Register two MIP en-face images using FFT-based phase correlation.
 
@@ -83,6 +83,8 @@ def register_mip_phase_correlation(mip1, mip2):
     Args:
         mip1: Reference MIP from Volume 0
         mip2: MIP to align from Volume 1
+        max_offset_x: Maximum allowed X-axis offset (±pixels). None = no limit.
+        max_offset_z: Maximum allowed Z-axis offset (±pixels). None = no limit.
 
     Returns:
         (offset_x, offset_z): Translation offset (lateral X, B-scan Z)
@@ -114,6 +116,12 @@ def register_mip_phase_correlation(mip1, mip2):
     # Calculate offset from center
     offset_x = peak_x - center_x
     offset_z = peak_z - center_z
+
+    # Apply constraints if specified
+    if max_offset_x is not None:
+        offset_x = np.clip(offset_x, -max_offset_x, max_offset_x)
+    if max_offset_z is not None:
+        offset_z = np.clip(offset_z, -max_offset_z, max_offset_z)
 
     # Confidence = peak strength relative to noise
     confidence = correlation.max() / (correlation.std() + 1e-8)

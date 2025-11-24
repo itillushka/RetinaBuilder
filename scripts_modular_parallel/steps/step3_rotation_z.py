@@ -74,20 +74,17 @@ def perform_z_rotation_alignment(ref_volume, mov_volume, visualize=False, positi
     rotation_axes = get_rotation_axes_for_position(position)
 
     print(f"  Position '{position}': Using rotation axes {rotation_axes}")
-    print(f"  Method: CONTOUR-BASED surface alignment")
+    print(f"  Method: NCC correlation-based alignment")
 
-    # Find optimal rotation angle using CONTOUR method
-    rotation_angle, rotation_metrics = find_optimal_rotation_z_contour(
+    # Find optimal rotation angle using NCC method (original)
+    rotation_angle, rotation_metrics = find_optimal_rotation_z(
         ref_volume,
         mov_volume,
         coarse_range=15,  # Test ±15° as requested
         coarse_step=1,
         fine_range=3,
         fine_step=0.5,
-        verbose=True,  # Enable verbose for debugging
-        visualize=visualize,  # Pass visualization flag
-        output_dir=output_dir,  # Pass output directory
-        position=position  # Pass volume position
+        verbose=True  # Enable verbose for debugging
     )
 
     # Extract central B-scan for visualization
@@ -100,12 +97,12 @@ def perform_z_rotation_alignment(ref_volume, mov_volume, visualize=False, positi
     # For now, NCC method works as before without detailed per-angle visualization
 
     # Apply rotation if significant (> 0.5 degrees)
-    # NOTE: Invert the angle when applying (same logic as Y-shift inversion)
+    # Apply rotation directly (NO inversion)
     if abs(rotation_angle) > 0.5:
-        # Apply rotation with position-specific axes (INVERTED)
+        # Apply rotation with position-specific axes
         volume_1_rotated = ndimage.rotate(
             mov_volume,
-            angle=-rotation_angle,  # INVERTED SIGN
+            angle=-rotation_angle,  # Direct angle, no inversion
             axes=rotation_axes,
             reshape=False,
             order=1,
@@ -113,9 +110,8 @@ def perform_z_rotation_alignment(ref_volume, mov_volume, visualize=False, positi
             cval=0
         )
         ncc_after = calculate_ncc_3d(ref_volume, volume_1_rotated)
-        print(f"  Applied {-rotation_angle:.2f}° rotation around axes {rotation_axes} (inverted)")
-        print(f"  Surface variance at optimal: {rotation_metrics.get('optimal_variance', 'N/A'):.2f} px²")
-        print(f"  Alignment score: {rotation_metrics.get('optimal_score', 'N/A'):.2f}")
+        print(f"  Applied {rotation_angle:.2f}° rotation around axes {rotation_axes}")
+        print(f"  NCC correlation at optimal: {rotation_metrics.get('optimal_correlation', 'N/A')}")
     else:
         volume_1_rotated = None
         ncc_after = calculate_ncc_3d(ref_volume, mov_volume)
@@ -125,9 +121,7 @@ def perform_z_rotation_alignment(ref_volume, mov_volume, visualize=False, positi
         'volume_1_rotated': volume_1_rotated,
         'rotation_angle': float(rotation_angle),
         'ncc_after': float(ncc_after),
-        'rotation_axes': rotation_axes,
-        'variance': float(rotation_metrics.get('optimal_variance', np.inf)),
-        'method': 'contour_variance'
+        'rotation_axes': rotation_axes
     }
 
 
@@ -173,25 +167,25 @@ def step3_rotation_z(step1_results, step2_results, data_dir, visualize=False):
     ncc_before = calculate_ncc_3d(overlap_v0, overlap_v1_y_aligned)
     print(f"  Baseline NCC: {ncc_before:.4f}")
 
-    # Find optimal rotation angle using CONTOUR-BASED method
-    print("\n2. Finding optimal rotation angle (CONTOUR-BASED)...")
+    # Find optimal rotation angle
+    print("\n2. Finding optimal rotation angle...")
 
     # Only generate mask visualization if visualize flag is set
     mask_vis_path = data_dir / 'step3_mask_verification.png' if visualize else None
 
-    rotation_angle, rotation_metrics = find_optimal_rotation_z_contour(
+    rotation_angle, rotation_metrics = find_optimal_rotation_z(
         overlap_v0,
         overlap_v1_y_aligned,
         coarse_range=15,
         coarse_step=1,
         fine_range=3,
         fine_step=0.5,
-        verbose=True
+        verbose=True,
+        visualize_masks=visualize,
+        mask_vis_path=mask_vis_path
     )
 
-    # Extract metrics from contour-based method
-    optimal_variance = rotation_metrics.get('optimal_variance', np.inf)
-    optimal_score = rotation_metrics.get('optimal_score', -np.inf)
+    correlation_optimal = rotation_metrics['optimal_correlation']
 
     # Apply rotation using PARALLEL OpenCV-based method
     print(f"\n3. Applying rotation: {rotation_angle:+.2f}° (PARALLEL)...")
@@ -249,23 +243,20 @@ def step3_rotation_z(step1_results, step2_results, data_dir, visualize=False):
     improvement = (ncc_final - ncc_before) * 100
     print(f"\n  Overall NCC improvement: {ncc_before:.4f} → {ncc_final:.4f} ({improvement:+.2f}%)")
     print(f"  Optimal rotation: {rotation_angle:+.2f}°")
-    print(f"  Surface variance at optimal: {optimal_variance:.2f} px²")
-    print(f"  Alignment score at optimal: {optimal_score:.2f}")
+    print(f"  Correlation at optimal: {correlation_optimal:.4f}")
     print(f"  Y-shift fine-tuning: {y_shift_correction:+.1f} px (NCC={y_shift_ncc:.4f})")
 
     results = {
-        # Rotation (Step 3) - CONTOUR-BASED METHOD
+        # Rotation (Step 3)
         'rotation_angle': float(rotation_angle),
-        'rotation_method': 'contour_variance',
-        'optimal_variance': float(optimal_variance),
-        'optimal_score': float(optimal_score),
-        'coarse_results': rotation_metrics.get('coarse_results', []),
-        'fine_results': rotation_metrics.get('fine_results', []),
+        'rotation_correlation': float(correlation_optimal),
+        'coarse_results': rotation_metrics['coarse_results'],
+        'fine_results': rotation_metrics['fine_results'],
         # Y-shift correction (Step 3.1)
         'y_shift_correction': float(y_shift_correction),
         'y_shift_ncc': float(y_shift_ncc),
         'y_shift_results': y_shift_results,
-        # NCC metrics (for validation)
+        # NCC metrics
         'ncc_before': float(ncc_before),
         'ncc_final': float(ncc_final),
         'ncc_improvement_percent': float(improvement),

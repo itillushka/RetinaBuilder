@@ -162,16 +162,19 @@ def perform_y_alignment(ref_volume, mov_volume):
     bscan_ref = ref_volume[:, :, z_center].copy()  # (Y, X)
     bscan_mov = mov_volume[:, :, z_center].copy()  # (Y, X)
 
-    # Method 1: Contour-based surface detection (primary)
+    # Method 1: Contour-based surface detection
     contour_offset, surface_ref, surface_mov = contour_based_y_offset(bscan_ref, bscan_mov)
 
-    # Method 2: NCC search (validation)
+    # Method 2: NCC search
     ncc_offset, ncc_scores, offsets_tested = ncc_search_y_offset(bscan_ref, bscan_mov, search_range=50)
 
-    # Use contour offset as primary (more reliable for surface alignment)
-    # NOTE: Invert sign when applying - if ref surface is above mov surface (negative offset),
-    # we need to shift mov DOWN (positive shift)
-    y_shift = -contour_offset  # INVERTED SIGN
+    # Prioritize whichever method gives higher displacement
+    if abs(ncc_offset) > abs(contour_offset):
+        y_shift = ncc_offset
+        print(f"  Using NCC offset ({ncc_offset:+.1f}) - higher than contour ({contour_offset:+.1f})")
+    else:
+        y_shift = contour_offset
+        print(f"  Using contour offset ({contour_offset:+.1f}) - higher than NCC ({ncc_offset:+.1f})")
 
     # Apply Y-shift to full volume using PARALLEL method
     # (NO 2.0x multiplier - that's only for visualization)
@@ -181,7 +184,7 @@ def perform_y_alignment(ref_volume, mov_volume):
 
     return {
         'volume_1_y_aligned': volume_1_y_aligned,
-        'y_shift': float(y_shift),  # Store the inverted shift that was actually applied
+        'y_shift': float(y_shift),  # Store the shift that was applied
         'contour_y_offset': float(contour_offset),
         'ncc_y_offset': float(ncc_offset)
     }
@@ -243,20 +246,20 @@ def step2_y_alignment(step1_results, data_dir):
     print(f"   [OK] Best Y-offset (NCC): {ncc_offset:+.2f} px")
     print(f"   [OK] Peak NCC score: {ncc_scores.max():.4f}")
 
-    # Compare methods
+    # Compare methods and prioritize higher displacement
     offset_diff = abs(ncc_offset - contour_offset)
     print(f"\n4. Method Comparison:")
-    print(f"   Contour offset (PRIMARY): {contour_offset:+.2f} px")
-    print(f"   NCC offset (validation):  {ncc_offset:+.2f} px")
-    print(f"   Difference:               {offset_diff:.2f} px")
-    if offset_diff < 3:
-        print(f"   [OK] Methods agree (diff < 3 px) - High confidence!")
-    else:
-        print(f"   [WARNING] Methods differ by {offset_diff:.1f} px - Using contour (more reliable for surface alignment)")
+    print(f"   Contour offset: {contour_offset:+.2f} px")
+    print(f"   NCC offset:     {ncc_offset:+.2f} px")
+    print(f"   Difference:     {offset_diff:.2f} px")
 
-    # Use contour offset as primary (directly aligns retinal surfaces)
-    # NOTE: Invert sign when applying the shift
-    y_shift = -contour_offset  # INVERTED SIGN
+    # Prioritize whichever method gives higher displacement
+    if abs(ncc_offset) > abs(contour_offset):
+        y_shift = ncc_offset
+        print(f"   [SELECTED] NCC offset ({ncc_offset:+.1f}) - higher displacement")
+    else:
+        y_shift = contour_offset
+        print(f"   [SELECTED] Contour offset ({contour_offset:+.1f}) - higher displacement")
 
     print(f"\n5. Applying Y-shift: {y_shift:+.2f} px (PARALLEL)...")
 

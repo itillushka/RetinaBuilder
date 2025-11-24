@@ -148,20 +148,20 @@ def apply_all_transformations_to_volume(volume_1_original, step1_results, step2_
     print(f"      ⏱️  {time.time() - t_start:.2f}s")
 
     # Step 2: Y shift (on expanded canvas, no clipping) - PARALLEL
-    print(f"  [2] Applying Y shift: dy={y_shift:.1f} (PARALLEL)")
+    # NOTE: Invert Y shift for visualization
+    print(f"  [2] Applying Y shift: dy={-y_shift:.1f} (PARALLEL, inverted)")
     t_start = time.time()
     volume_1_transformed = shift_volume_y_parallel(
-        volume_1_transformed, y_shift, n_jobs=-1
+        volume_1_transformed, -y_shift, n_jobs=-1  # INVERTED
     )
     print(f"      ⏱️  {time.time() - t_start:.2f}s")
 
     # Step 3: Z-rotation (reshape=False, using pre-expanded canvas) - PARALLEL
-    # NOTE: Invert rotation angle when applying (same as Y-shift inversion)
-    print(f"  [3] Applying Z-rotation: {-rotation_angle_z:+.2f}° around axes {rotation_axes} (PARALLEL, pre-expanded canvas, inverted)")
+    print(f"  [3] Applying Z-rotation: {rotation_angle_z:+.2f}° around axes {rotation_axes} (PARALLEL, pre-expanded canvas)")
     t_start = time.time()
     volume_1_transformed = apply_rotation_z_parallel(
         volume_1_transformed,
-        -rotation_angle_z,  # INVERTED SIGN
+        rotation_angle_z,  # Direct angle, no inversion
         axes=rotation_axes,
         n_jobs=-1
     )

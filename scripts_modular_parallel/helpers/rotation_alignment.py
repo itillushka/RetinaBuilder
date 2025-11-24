@@ -175,12 +175,12 @@ def preprocess_oct_for_visualization(img):
     Same as preprocess_oct_for_rotation() but WITHOUT the horizontal kernel filter
     that can make images appear dark in matplotlib displays.
 
-    EXTRA HARSH DENOISING (20% harsher than before):
-    - Stronger NLM denoising (h=30 vs 25)
-    - Stronger bilateral filtering (sigma=180 vs 150)
-    - Larger median filter (19x19 vs 15x15)
-    - EXTRA HARSH threshold (60% vs 40% of Otsu - keeps only strongest signals)
-    - Stronger CLAHE (clipLimit=3.6 vs 3.0)
+    EXTRA HARSH DENOISING (for three_volume_alignment and averaged_bscan_alignment):
+    - Stronger NLM denoising (h=30 vs 25) - +20%
+    - Stronger bilateral filtering (sigma=180 vs 150) - +20%
+    - Larger median filter (19x19 vs 15x15) - +27%
+    - EXTRA HARSH threshold (60% vs 50% of Otsu) - keeps only strongest signals
+    - Stronger CLAHE (clipLimit=3.6 vs 3.0) - +20%
 
     Args:
         img: Input B-scan (2D array)
@@ -202,7 +202,7 @@ def preprocess_oct_for_visualization(img):
 
     # Step 4: Threshold (60% of Otsu - EXTRA HARSHER, keeps only strongest signals)
     thresh_val = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[0]
-    thresh_val = int(thresh_val * 0.6)  # 60% instead of 40% = 20% HARSHER
+    thresh_val = int(thresh_val * 0.6)  # 60% instead of 50% = EXTRA HARSH
     denoised[denoised < thresh_val] = 0
 
     # Step 5: CLAHE contrast enhancement (20% stronger)
@@ -2316,26 +2316,12 @@ def calculate_contour_alignment_score(surface_v0, surface_v1, mask_columns):
     # Calculate surface difference
     diff = surf_v0_valid - surf_v1_valid
 
-    # CRITICAL: Filter outliers (NaN and >100px differences)
-    # This prevents extreme outliers from skewing variance calculations
-    valid_mask = ~np.isnan(diff) & (np.abs(diff) < 100)
-    diff_clean = diff[valid_mask]
-
-    # Check if enough valid points remain after filtering
-    if len(diff_clean) < 10:
-        return -np.inf, {
-            'variance': np.inf,
-            'mad': np.inf,
-            'valid_pixels': len(diff_clean),
-            'outliers_removed': int(len(diff) - len(diff_clean))
-        }
-
     # Primary metric: Variance (lower = more parallel surfaces)
-    variance = np.var(diff_clean)
+    variance = np.var(diff)
 
     # Secondary metric: Median Absolute Deviation (robust to outliers)
-    median_diff = np.median(diff_clean)
-    mad = np.median(np.abs(diff_clean - median_diff))
+    median_diff = np.median(diff)
+    mad = np.median(np.abs(diff - median_diff))
 
     # Score: Negative variance (so higher is better)
     score = -variance
@@ -2344,9 +2330,8 @@ def calculate_contour_alignment_score(surface_v0, surface_v1, mask_columns):
         'variance': float(variance),
         'mad': float(mad),
         'median_diff': float(median_diff),
-        'valid_pixels': int(len(diff_clean)),
-        'outliers_removed': int(len(diff) - len(diff_clean)),
-        'rms': float(np.sqrt(np.mean(diff_clean**2)))
+        'valid_pixels': int(mask_columns.sum()),
+        'rms': float(np.sqrt(np.mean(diff**2)))
     }
 
     return score, metrics
@@ -2618,8 +2603,7 @@ def find_optimal_rotation_z_contour_fine(overlap_v0, overlap_v1, coarse_angle, a
 
 
 def find_optimal_rotation_z_contour(overlap_v0, overlap_v1, coarse_range=20, coarse_step=1,
-                                    fine_range=3, fine_step=0.5, verbose=True,
-                                    visualize=False, output_dir=None, position="unknown"):
+                                    fine_range=3, fine_step=0.5, verbose=True):
     """
     Find optimal Z-rotation angle using contour-based surface alignment.
 
@@ -2635,9 +2619,6 @@ def find_optimal_rotation_z_contour(overlap_v0, overlap_v1, coarse_range=20, coa
         fine_range: Fine search range around coarse optimum (±degrees)
         fine_step: Fine step size (degrees)
         verbose: Print progress information
-        visualize: Generate comprehensive visualizations (default: False)
-        output_dir: Directory to save visualizations (required if visualize=True)
-        position: Volume position identifier (e.g., 'right', 'left')
 
     Returns:
         optimal_angle: Best rotation angle in degrees
@@ -2689,25 +2670,6 @@ def find_optimal_rotation_z_contour(overlap_v0, overlap_v1, coarse_range=20, coa
         'fine_results': fine_results,
         'method': 'contour_variance'
     }
-
-    # Generate comprehensive visualization if requested
-    if visualize and output_dir is not None:
-        # Extract central B-scans
-        Z = overlap_v0.shape[2]
-        z_mid = Z // 2
-        bscan_v0 = overlap_v0[:, :, z_mid]
-        bscan_v1 = overlap_v1[:, :, z_mid]
-
-        create_comprehensive_rotation_visualization(
-            bscan_v0=bscan_v0,
-            bscan_v1=bscan_v1,
-            coarse_results=coarse_results,
-            fine_results=fine_results,
-            optimal_angle=optimal_angle,
-            optimal_result=best_fine,
-            output_dir=output_dir,
-            position=position
-        )
 
     return optimal_angle, metrics
 
@@ -2978,223 +2940,6 @@ def create_rotation_search_summary(coarse_results, fine_results, optimal_angle, 
     plt.close()
 
     print(f"  ✓ Saved rotation search summary: {output_path.name}")
-
-
-def create_comprehensive_rotation_visualization(
-    bscan_v0, bscan_v1,
-    coarse_results, fine_results,
-    optimal_angle, optimal_result,
-    output_dir, position="unknown"
-):
-    """
-    Create comprehensive visualization with 4 plots showing complete rotation analysis.
-
-    Plots created:
-    1. Original B-scans side-by-side
-    2. Detected surfaces at key angles (including optimal)
-    3. Score vs angle landscape (coarse + fine)
-    4. Best alignment result with overlay
-
-    Args:
-        bscan_v0: Reference B-scan (Y, X)
-        bscan_v1: Moving B-scan (Y, X)
-        coarse_results: List of coarse search results
-        fine_results: List of fine search results
-        optimal_angle: Optimal rotation angle found
-        optimal_result: Result dict for optimal angle
-        output_dir: Directory to save visualizations
-        position: Volume position (e.g., 'right', 'left')
-    """
-    from pathlib import Path
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Combine all results for analysis
-    all_results = coarse_results + fine_results
-
-    print(f"\n  Creating comprehensive rotation visualizations...")
-
-    # ========================================================================
-    # PLOT 1: Original B-scans side-by-side
-    # ========================================================================
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
-    axes[0].imshow(bscan_v0, cmap='gray', aspect='auto')
-    axes[0].set_title(f'Reference B-scan\n(Volume {position} - Reference)', fontsize=12, fontweight='bold')
-    axes[0].set_xlabel('X (lateral)')
-    axes[0].set_ylabel('Y (depth)')
-
-    axes[1].imshow(bscan_v1, cmap='gray', aspect='auto')
-    axes[1].set_title(f'Moving B-scan\n(Volume {position} - Before Rotation)', fontsize=12, fontweight='bold')
-    axes[1].set_xlabel('X (lateral)')
-    axes[1].set_ylabel('Y (depth)')
-
-    plt.tight_layout()
-    plt.savefig(output_dir / f'rotation_{position}_01_original_bscans.png', dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"    ✓ Saved: rotation_{position}_01_original_bscans.png")
-
-    # ========================================================================
-    # PLOT 2: Detected surfaces at key angles
-    # ========================================================================
-    # Select key angles to show
-    angles_to_show = []
-    if coarse_results:
-        coarse_angles = [r['angle'] for r in coarse_results if r['score'] > -np.inf]
-        if coarse_angles:
-            angles_to_show.extend([min(coarse_angles), 0.0, max(coarse_angles)])
-    angles_to_show.append(optimal_angle)
-    angles_to_show = sorted(list(set(angles_to_show)))  # Remove duplicates
-    angles_to_show = angles_to_show[:6]  # Limit to 6 angles
-
-    n_angles = len(angles_to_show)
-    if n_angles > 0:
-        fig, axes = plt.subplots(2, n_angles, figsize=(4*n_angles, 8))
-        if n_angles == 1:
-            axes = axes.reshape(2, 1)
-
-        for i, angle in enumerate(angles_to_show):
-            # Find result for this angle
-            result = None
-            for r in all_results:
-                if abs(r['angle'] - angle) < 0.01:
-                    result = r
-                    break
-
-            if result is None or result.get('surface_v0') is None:
-                axes[0, i].text(0.5, 0.5, f'No data\n{angle:+.1f}°',
-                              ha='center', va='center', transform=axes[0, i].transAxes)
-                axes[1, i].text(0.5, 0.5, f'No data\n{angle:+.1f}°',
-                              ha='center', va='center', transform=axes[1, i].transAxes)
-                continue
-
-            # Top row: Reference B-scan with surface
-            axes[0, i].imshow(result.get('bscan_v0_denoised', bscan_v0), cmap='gray', aspect='auto')
-            if result.get('surface_v0') is not None:
-                x_coords = np.arange(len(result['surface_v0']))
-                axes[0, i].plot(x_coords, result['surface_v0'], 'r-', linewidth=1.5)
-            axes[0, i].set_title(f'Reference\n{angle:+.1f}°', fontsize=10)
-            axes[0, i].set_ylabel('Y (depth)')
-
-            # Bottom row: Rotated B-scan with surface
-            axes[1, i].imshow(result.get('bscan_v1_denoised', bscan_v1), cmap='gray', aspect='auto')
-            if result.get('surface_v1') is not None:
-                x_coords = np.arange(len(result['surface_v1']))
-                axes[1, i].plot(x_coords, result['surface_v1'], 'b-', linewidth=1.5)
-
-            score_text = f"Score: {result['score']:.2f}\nVar: {result['variance']:.2f}"
-            axes[1, i].text(0.02, 0.98, score_text, transform=axes[1, i].transAxes,
-                           fontsize=8, verticalalignment='top',
-                           bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-            axes[1, i].set_title(f'Rotated {angle:+.1f}°', fontsize=10)
-            axes[1, i].set_xlabel('X (lateral)')
-            axes[1, i].set_ylabel('Y (depth)')
-
-        plt.tight_layout()
-        plt.savefig(output_dir / f'rotation_{position}_02_surfaces_at_angles.png', dpi=150, bbox_inches='tight')
-        plt.close()
-        print(f"    ✓ Saved: rotation_{position}_02_surfaces_at_angles.png")
-
-    # ========================================================================
-    # PLOT 3: Score vs angle landscape
-    # ========================================================================
-    fig, axes = plt.subplots(2, 1, figsize=(12, 8))
-
-    # Coarse search
-    coarse_angles = [r['angle'] for r in coarse_results if r['score'] > -np.inf]
-    coarse_scores = [r['score'] for r in coarse_results if r['score'] > -np.inf]
-    coarse_variances = [r['variance'] for r in coarse_results if r['variance'] < np.inf]
-
-    if coarse_angles:
-        axes[0].plot(coarse_angles, coarse_scores, 'bo-', linewidth=2, markersize=6, label='Coarse search')
-        axes[0].axvline(x=optimal_angle, color='g', linestyle='--', linewidth=2, label=f'Optimal: {optimal_angle:+.1f}°')
-        axes[0].axhline(y=0, color='r', linestyle=':', alpha=0.3)
-        axes[0].grid(True, alpha=0.3)
-        axes[0].set_xlabel('Rotation Angle (degrees)', fontsize=11)
-        axes[0].set_ylabel('Alignment Score (higher = better)', fontsize=11)
-        axes[0].set_title('Score vs Rotation Angle', fontsize=13, fontweight='bold')
-        axes[0].legend()
-
-    # Fine search
-    fine_angles = [r['angle'] for r in fine_results if r['score'] > -np.inf]
-    fine_scores = [r['score'] for r in fine_results if r['score'] > -np.inf]
-
-    if fine_angles:
-        axes[1].plot(fine_angles, fine_scores, 'mo-', linewidth=2, markersize=6, label='Fine search')
-        axes[1].axvline(x=optimal_angle, color='g', linestyle='--', linewidth=2, label=f'Optimal: {optimal_angle:+.2f}°')
-        axes[1].axhline(y=0, color='r', linestyle=':', alpha=0.3)
-        axes[1].grid(True, alpha=0.3)
-        axes[1].set_xlabel('Rotation Angle (degrees)', fontsize=11)
-        axes[1].set_ylabel('Alignment Score (higher = better)', fontsize=11)
-        axes[1].set_title('Fine Search: Score vs Angle', fontsize=13, fontweight='bold')
-        axes[1].legend()
-
-    plt.tight_layout()
-    plt.savefig(output_dir / f'rotation_{position}_03_score_landscape.png', dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"    ✓ Saved: rotation_{position}_03_score_landscape.png")
-
-    # ========================================================================
-    # PLOT 4: Best alignment result with overlay
-    # ========================================================================
-    if optimal_result and optimal_result.get('surface_v0') is not None:
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-
-        # Top-left: Reference with surface
-        axes[0, 0].imshow(bscan_v0, cmap='gray', aspect='auto')
-        x_coords = np.arange(len(optimal_result['surface_v0']))
-        axes[0, 0].plot(x_coords, optimal_result['surface_v0'], 'r-', linewidth=2, label='Surface V0')
-        axes[0, 0].set_title('Reference B-scan', fontsize=12, fontweight='bold')
-        axes[0, 0].set_ylabel('Y (depth)')
-        axes[0, 0].legend()
-
-        # Top-right: Rotated with surface
-        axes[0, 1].imshow(optimal_result.get('bscan_v1_rotated', bscan_v1), cmap='gray', aspect='auto')
-        x_coords = np.arange(len(optimal_result['surface_v1']))
-        axes[0, 1].plot(x_coords, optimal_result['surface_v1'], 'b-', linewidth=2, label='Surface V1')
-        axes[0, 1].set_title(f'Rotated at {optimal_angle:+.2f}°', fontsize=12, fontweight='bold')
-        axes[0, 1].set_ylabel('Y (depth)')
-        axes[0, 1].legend()
-
-        # Bottom-left: Surface overlay
-        axes[1, 0].imshow(bscan_v0, cmap='gray', aspect='auto', alpha=0.7)
-        x_coords = np.arange(len(optimal_result['surface_v0']))
-        axes[1, 0].plot(x_coords, optimal_result['surface_v0'], 'r-', linewidth=2.5, label='V0', alpha=0.9)
-        axes[1, 0].plot(x_coords, optimal_result['surface_v1'], 'b-', linewidth=2.5, label='V1 (aligned)', alpha=0.9)
-        axes[1, 0].set_title('Surface Overlay', fontsize=12, fontweight='bold')
-        axes[1, 0].set_xlabel('X (lateral)')
-        axes[1, 0].set_ylabel('Y (depth)')
-        axes[1, 0].legend()
-
-        # Bottom-right: Surface difference
-        surf_diff = optimal_result['surface_v0'] - optimal_result['surface_v1']
-        x_coords = np.arange(len(surf_diff))
-        axes[1, 1].plot(x_coords, surf_diff, 'purple', linewidth=1.5)
-        axes[1, 1].axhline(y=0, color='k', linestyle='--', alpha=0.5)
-        axes[1, 1].fill_between(x_coords, 0, surf_diff, alpha=0.3, color='purple')
-        axes[1, 1].set_title('Surface Difference (V0 - V1)', fontsize=12, fontweight='bold')
-        axes[1, 1].set_xlabel('X (lateral)')
-        axes[1, 1].set_ylabel('Difference (pixels)')
-        axes[1, 1].grid(True, alpha=0.3)
-
-        # Add stats
-        diff_clean = surf_diff[~np.isnan(surf_diff)]
-        if len(diff_clean) > 0:
-            stats_text = (f"Variance: {optimal_result['variance']:.2f} px²\n"
-                         f"MAD: {optimal_result.get('mad', 0):.2f} px\n"
-                         f"Mean: {diff_clean.mean():.2f} px")
-            axes[1, 1].text(0.02, 0.98, stats_text, transform=axes[1, 1].transAxes,
-                           fontsize=10, verticalalignment='top',
-                           bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
-
-        plt.suptitle(f'Best Alignment: {optimal_angle:+.2f}° (Score: {optimal_result["score"]:.2f})',
-                    fontsize=14, fontweight='bold')
-        plt.tight_layout()
-        plt.savefig(output_dir / f'rotation_{position}_04_best_alignment.png', dpi=150, bbox_inches='tight')
-        plt.close()
-        print(f"    ✓ Saved: rotation_{position}_04_best_alignment.png")
-
-    print(f"  ✓ All visualizations saved to: {output_dir}")
 
 
 if __name__ == "__main__":

@@ -74,17 +74,20 @@ def perform_z_rotation_alignment(ref_volume, mov_volume, visualize=False, positi
     rotation_axes = get_rotation_axes_for_position(position)
 
     print(f"  Position '{position}': Using rotation axes {rotation_axes}")
-    print(f"  Method: NCC correlation-based alignment")
+    print(f"  Method: CONTOUR-BASED surface alignment")
 
-    # Find optimal rotation angle using NCC method (original)
-    rotation_angle, rotation_metrics = find_optimal_rotation_z(
+    # Find optimal rotation angle using CONTOUR method
+    rotation_angle, rotation_metrics = find_optimal_rotation_z_contour(
         ref_volume,
         mov_volume,
         coarse_range=15,  # Test ±15° as requested
         coarse_step=1,
         fine_range=3,
         fine_step=0.5,
-        verbose=True  # Enable verbose for debugging
+        verbose=True,  # Enable verbose for debugging
+        visualize=visualize,  # Pass visualization flag
+        output_dir=output_dir,  # Pass output directory
+        position=position  # Pass volume position
     )
 
     # Extract central B-scan for visualization
@@ -111,7 +114,8 @@ def perform_z_rotation_alignment(ref_volume, mov_volume, visualize=False, positi
         )
         ncc_after = calculate_ncc_3d(ref_volume, volume_1_rotated)
         print(f"  Applied {-rotation_angle:.2f}° rotation around axes {rotation_axes} (inverted)")
-        print(f"  NCC correlation at optimal: {rotation_metrics.get('optimal_correlation', 'N/A')}")
+        print(f"  Surface variance at optimal: {rotation_metrics.get('optimal_variance', 'N/A'):.2f} px²")
+        print(f"  Alignment score: {rotation_metrics.get('optimal_score', 'N/A'):.2f}")
     else:
         volume_1_rotated = None
         ncc_after = calculate_ncc_3d(ref_volume, mov_volume)
@@ -121,7 +125,9 @@ def perform_z_rotation_alignment(ref_volume, mov_volume, visualize=False, positi
         'volume_1_rotated': volume_1_rotated,
         'rotation_angle': float(rotation_angle),
         'ncc_after': float(ncc_after),
-        'rotation_axes': rotation_axes
+        'rotation_axes': rotation_axes,
+        'variance': float(rotation_metrics.get('optimal_variance', np.inf)),
+        'method': 'contour_variance'
     }
 
 
@@ -167,25 +173,25 @@ def step3_rotation_z(step1_results, step2_results, data_dir, visualize=False):
     ncc_before = calculate_ncc_3d(overlap_v0, overlap_v1_y_aligned)
     print(f"  Baseline NCC: {ncc_before:.4f}")
 
-    # Find optimal rotation angle
-    print("\n2. Finding optimal rotation angle...")
+    # Find optimal rotation angle using CONTOUR-BASED method
+    print("\n2. Finding optimal rotation angle (CONTOUR-BASED)...")
 
     # Only generate mask visualization if visualize flag is set
     mask_vis_path = data_dir / 'step3_mask_verification.png' if visualize else None
 
-    rotation_angle, rotation_metrics = find_optimal_rotation_z(
+    rotation_angle, rotation_metrics = find_optimal_rotation_z_contour(
         overlap_v0,
         overlap_v1_y_aligned,
         coarse_range=15,
         coarse_step=1,
         fine_range=3,
         fine_step=0.5,
-        verbose=True,
-        visualize_masks=visualize,
-        mask_vis_path=mask_vis_path
+        verbose=True
     )
 
-    correlation_optimal = rotation_metrics['optimal_correlation']
+    # Extract metrics from contour-based method
+    optimal_variance = rotation_metrics.get('optimal_variance', np.inf)
+    optimal_score = rotation_metrics.get('optimal_score', -np.inf)
 
     # Apply rotation using PARALLEL OpenCV-based method
     print(f"\n3. Applying rotation: {rotation_angle:+.2f}° (PARALLEL)...")
@@ -243,20 +249,23 @@ def step3_rotation_z(step1_results, step2_results, data_dir, visualize=False):
     improvement = (ncc_final - ncc_before) * 100
     print(f"\n  Overall NCC improvement: {ncc_before:.4f} → {ncc_final:.4f} ({improvement:+.2f}%)")
     print(f"  Optimal rotation: {rotation_angle:+.2f}°")
-    print(f"  Correlation at optimal: {correlation_optimal:.4f}")
+    print(f"  Surface variance at optimal: {optimal_variance:.2f} px²")
+    print(f"  Alignment score at optimal: {optimal_score:.2f}")
     print(f"  Y-shift fine-tuning: {y_shift_correction:+.1f} px (NCC={y_shift_ncc:.4f})")
 
     results = {
-        # Rotation (Step 3)
+        # Rotation (Step 3) - CONTOUR-BASED METHOD
         'rotation_angle': float(rotation_angle),
-        'rotation_correlation': float(correlation_optimal),
-        'coarse_results': rotation_metrics['coarse_results'],
-        'fine_results': rotation_metrics['fine_results'],
+        'rotation_method': 'contour_variance',
+        'optimal_variance': float(optimal_variance),
+        'optimal_score': float(optimal_score),
+        'coarse_results': rotation_metrics.get('coarse_results', []),
+        'fine_results': rotation_metrics.get('fine_results', []),
         # Y-shift correction (Step 3.1)
         'y_shift_correction': float(y_shift_correction),
         'y_shift_ncc': float(y_shift_ncc),
         'y_shift_results': y_shift_results,
-        # NCC metrics
+        # NCC metrics (for validation)
         'ncc_before': float(ncc_before),
         'ncc_final': float(ncc_final),
         'ncc_improvement_percent': float(improvement),

@@ -29,8 +29,10 @@ from scipy import ndimage
 from scipy.ndimage import rotate
 import matplotlib.pyplot as plt
 import cv2
-from multiprocessing import Pool, cpu_count
+from multiprocessing import Pool
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import partial
+import os
 
 
 # ============================================================================
@@ -526,10 +528,10 @@ def find_optimal_rotation_z_coarse(overlap_v0, overlap_v1,
     bscan_v0_proc = preprocess_oct_for_rotation(bscan_v0, mask=mask_v0)
 
     if verbose:
-        print(f"  Starting PARALLEL rotation search (using {min(cpu_count(), len(angles_to_test))} workers)...")
+        print(f"  Starting PARALLEL rotation search (using {min(os.cpu_count(), len(angles_to_test))} workers)...")
 
     # PARALLEL PROCESSING: Test all angles in parallel
-    num_workers = min(cpu_count(), len(angles_to_test))
+    num_workers = min(os.cpu_count(), len(angles_to_test))
 
     with Pool(processes=num_workers) as pool:
         # Create partial function with fixed parameters
@@ -609,10 +611,10 @@ def find_optimal_rotation_z_fine(overlap_v0, overlap_v1,
     bscan_v0_proc = preprocess_oct_for_rotation(bscan_v0, mask=mask_v0)
 
     if verbose:
-        print(f"  Starting PARALLEL fine search (using {min(cpu_count(), len(angles_to_test))} workers)...")
+        print(f"  Starting PARALLEL fine search (using {min(os.cpu_count(), len(angles_to_test))} workers)...")
 
     # PARALLEL PROCESSING: Test all angles in parallel
-    num_workers = min(cpu_count(), len(angles_to_test))
+    num_workers = min(os.cpu_count(), len(angles_to_test))
 
     with Pool(processes=num_workers) as pool:
         # Create partial function with fixed parameters
@@ -2277,11 +2279,668 @@ def visualize_deformation_field(deformation_field, output_path, slice_z=None):
     print(f"  ✓ Saved: {output_path.name}")
 
 
+# ============================================================================
+# CONTOUR-BASED ROTATION ALIGNMENT (NEW)
+# ============================================================================
+
+def calculate_contour_alignment_score(surface_v0, surface_v1, mask_columns):
+    """
+    Calculate alignment quality based on surface contour similarity.
+
+    Uses variance of surface differences as the primary metric - lower variance
+    means surfaces are more parallel (better aligned).
+
+    Args:
+        surface_v0: Detected surface for reference B-scan (X,)
+        surface_v1: Detected surface for moving B-scan (X,)
+        mask_columns: Boolean mask indicating valid columns (X,)
+
+    Returns:
+        score: Alignment score (higher is better, so we negate variance)
+        metrics: Dictionary with detailed metrics
+    """
+    # Extract valid regions only
+    if not mask_columns.any():
+        return -np.inf, {'variance': np.inf, 'mad': np.inf, 'valid_pixels': 0}
+
+    surf_v0_valid = surface_v0[mask_columns]
+    surf_v1_valid = surface_v1[mask_columns]
+
+    # Calculate surface difference
+    diff = surf_v0_valid - surf_v1_valid
+
+    # Primary metric: Variance (lower = more parallel surfaces)
+    variance = np.var(diff)
+
+    # Secondary metric: Median Absolute Deviation (robust to outliers)
+    median_diff = np.median(diff)
+    mad = np.median(np.abs(diff - median_diff))
+
+    # Score: Negative variance (so higher is better)
+    score = -variance
+
+    metrics = {
+        'variance': float(variance),
+        'mad': float(mad),
+        'median_diff': float(median_diff),
+        'valid_pixels': int(mask_columns.sum()),
+        'rms': float(np.sqrt(np.mean(diff**2)))
+    }
+
+    return score, metrics
+
+
+def create_rotation_mask(bscan_v0, bscan_v1_rotated, threshold_percentile=10, min_valid_pixels_per_column=5):
+    """
+    Create combined mask for valid regions after rotation.
+
+    Excludes:
+    - Rotation-induced zero padding
+    - Background noise regions
+    - Columns with insufficient valid pixels
+
+    Args:
+        bscan_v0: Reference B-scan (Y, X)
+        bscan_v1_rotated: Rotated moving B-scan (Y, X)
+        threshold_percentile: Percentile for tissue threshold (default: 10)
+        min_valid_pixels_per_column: Minimum valid pixels required per column
+
+    Returns:
+        mask_2d: 2D mask (Y, X) indicating valid regions
+        mask_columns: 1D mask (X,) indicating valid columns
+    """
+    Y, X = bscan_v0.shape
+
+    # Threshold for valid tissue (10th percentile of non-zero pixels)
+    if (bscan_v0 > 0).any():
+        threshold_v0 = np.percentile(bscan_v0[bscan_v0 > 0], threshold_percentile)
+    else:
+        threshold_v0 = 0
+
+    if (bscan_v1_rotated > 0).any():
+        threshold_v1 = np.percentile(bscan_v1_rotated[bscan_v1_rotated > 0], threshold_percentile)
+    else:
+        threshold_v1 = 0
+
+    # Create masks for valid tissue regions
+    mask_v0 = bscan_v0 > threshold_v0
+    mask_v1 = bscan_v1_rotated > threshold_v1
+
+    # Combined mask: both must be valid
+    mask_2d = mask_v0 & mask_v1
+
+    # Per-column validity: column must have enough valid pixels
+    valid_pixels_per_column = mask_2d.sum(axis=0)
+    mask_columns = valid_pixels_per_column >= min_valid_pixels_per_column
+
+    return mask_2d, mask_columns
+
+
+def detect_surface_in_masked_region(bscan_denoised, mask_columns):
+    """
+    Detect retinal surface only in valid columns.
+
+    For invalid columns, surface is set to NaN.
+
+    Args:
+        bscan_denoised: Preprocessed B-scan (Y, X), uint8
+        mask_columns: Boolean mask (X,) indicating valid columns
+
+    Returns:
+        surface: Surface array (X,) with NaN for invalid columns
+    """
+    Y, X = bscan_denoised.shape
+    surface = np.full(X, np.nan)
+
+    # Threshold for surface detection
+    threshold = np.percentile(bscan_denoised, 70)
+    _, binary = cv2.threshold(bscan_denoised, threshold, 255, cv2.THRESH_BINARY)
+
+    # Detect surface only in valid columns
+    for x in range(X):
+        if not mask_columns[x]:
+            continue  # Skip invalid columns
+
+        column = binary[:, x]
+        white_pixels = np.where(column > 0)[0]
+        if len(white_pixels) > 0:
+            surface[x] = white_pixels[0]  # First white pixel from top
+        else:
+            # No surface detected - try to interpolate from neighbors
+            # For now, set to NaN (will be handled by masking)
+            surface[x] = np.nan
+
+    return surface
+
+
+def _test_single_rotation_angle_contour(angle, bscan_v0, bscan_v1):
+    """
+    Worker function to test a single rotation angle using contour method.
+
+    Args:
+        angle: Rotation angle to test (degrees)
+        bscan_v0: Reference B-scan (Y, X)
+        bscan_v1: Moving B-scan (Y, X)
+
+    Returns:
+        Dictionary with angle, score, surfaces, and metrics
+    """
+    try:
+        # Rotate moving B-scan
+        bscan_v1_rotated = ndimage.rotate(
+            bscan_v1, angle, axes=(0, 1),
+            reshape=False, order=1,
+            mode='constant', cval=0
+        )
+
+        # Create mask for valid regions
+        mask_2d, mask_columns = create_rotation_mask(bscan_v0, bscan_v1_rotated)
+
+        # Check if enough valid pixels
+        if mask_columns.sum() < 10:  # Need at least 10 valid columns
+            return {
+                'angle': float(angle),
+                'score': -np.inf,
+                'variance': np.inf,
+                'valid_pixels': 0,
+                'surface_v0': None,
+                'surface_v1': None,
+                'mask_columns': mask_columns
+            }
+
+        # Preprocess both B-scans for surface detection
+        bscan_v0_denoised = preprocess_oct_for_visualization(bscan_v0)
+        bscan_v1_denoised = preprocess_oct_for_visualization(bscan_v1_rotated)
+
+        # Detect surfaces in masked regions
+        surface_v0 = detect_surface_in_masked_region(bscan_v0_denoised, mask_columns)
+        surface_v1 = detect_surface_in_masked_region(bscan_v1_denoised, mask_columns)
+
+        # Calculate alignment score
+        score, metrics = calculate_contour_alignment_score(surface_v0, surface_v1, mask_columns)
+
+        # Also calculate NCC for comparison
+        ncc_score = calculate_ncc_3d(bscan_v0[:, :, np.newaxis], bscan_v1_rotated[:, :, np.newaxis])
+
+        return {
+            'angle': float(angle),
+            'score': float(score),
+            'variance': metrics['variance'],
+            'mad': metrics['mad'],
+            'valid_pixels': metrics['valid_pixels'],
+            'ncc_score': float(ncc_score),  # ADDED: NCC for comparison
+            'surface_v0': surface_v0,
+            'surface_v1': surface_v1,
+            'mask_columns': mask_columns,
+            'bscan_v0_denoised': bscan_v0_denoised,
+            'bscan_v1_denoised': bscan_v1_denoised
+        }
+
+    except Exception as e:
+        return {
+            'angle': float(angle),
+            'score': -np.inf,
+            'variance': np.inf,
+            'valid_pixels': 0,
+            'error': str(e)
+        }
+
+
+def find_optimal_rotation_z_contour_coarse(overlap_v0, overlap_v1, angle_range=20, step=1, verbose=True):
+    """
+    Coarse rotation search using contour-based alignment.
+
+    Tests angles from -angle_range to +angle_range with given step size.
+    Uses parallel processing for speed.
+
+    Args:
+        overlap_v0: Reference overlap volume (Y, X, Z)
+        overlap_v1: Moving overlap volume (Y, X, Z)
+        angle_range: Search range in degrees (±range)
+        step: Step size in degrees
+        verbose: Print progress
+
+    Returns:
+        best_angle: Optimal rotation angle
+        results: List of result dictionaries for all tested angles
+    """
+    # Use central B-scan for rotation search (same as NCC method)
+    Z = overlap_v0.shape[2]
+    z_mid = Z // 2
+    bscan_v0 = overlap_v0[:, :, z_mid]
+    bscan_v1 = overlap_v1[:, :, z_mid]
+
+    if verbose:
+        print(f"\n  Coarse search: Testing angles from {-angle_range}° to +{angle_range}° (step: {step}°)")
+        print(f"  Using central B-scan (z={z_mid}/{Z})")
+
+    # Generate angles to test
+    angles = np.arange(-angle_range, angle_range + step, step)
+
+    if verbose:
+        print(f"  Testing {len(angles)} angles...")
+
+    # Sequential processing (Windows-compatible - parallel had pickling issues)
+    results = []
+    for angle in angles:
+        result = _test_single_rotation_angle_contour(angle, bscan_v0, bscan_v1)
+        results.append(result)
+
+    # Find best angle
+    valid_results = [r for r in results if r['score'] > -np.inf]
+    if not valid_results:
+        if verbose:
+            print("  ⚠️  No valid rotation angles found!")
+        return 0.0, results
+
+    best_result = max(valid_results, key=lambda x: x['score'])
+    best_angle = best_result['angle']
+
+    if verbose:
+        print(f"  ✓ Coarse best: {best_angle:+.1f}° (score: {best_result['score']:.2f}, variance: {best_result['variance']:.2f})")
+
+    return best_angle, results
+
+
+def find_optimal_rotation_z_contour_fine(overlap_v0, overlap_v1, coarse_angle, angle_range=3, step=0.5, verbose=True):
+    """
+    Fine rotation search around coarse optimum using contour-based alignment.
+
+    Args:
+        overlap_v0: Reference overlap volume (Y, X, Z)
+        overlap_v1: Moving overlap volume (Y, X, Z)
+        coarse_angle: Center angle from coarse search
+        angle_range: Search range around coarse angle (±range)
+        step: Step size in degrees
+        verbose: Print progress
+
+    Returns:
+        best_angle: Optimal rotation angle
+        results: List of result dictionaries for all tested angles
+    """
+    # Use central B-scan
+    Z = overlap_v0.shape[2]
+    z_mid = Z // 2
+    bscan_v0 = overlap_v0[:, :, z_mid]
+    bscan_v1 = overlap_v1[:, :, z_mid]
+
+    if verbose:
+        print(f"\n  Fine search: Testing angles around {coarse_angle:+.1f}° (±{angle_range}°, step: {step}°)")
+
+    # Generate angles to test
+    angles = np.arange(coarse_angle - angle_range, coarse_angle + angle_range + step, step)
+
+    if verbose:
+        print(f"  Testing {len(angles)} angles...")
+
+    # Sequential processing (Windows-compatible - parallel had pickling issues)
+    results = []
+    for angle in angles:
+        result = _test_single_rotation_angle_contour(angle, bscan_v0, bscan_v1)
+        results.append(result)
+
+    # Find best angle
+    valid_results = [r for r in results if r['score'] > -np.inf]
+    if not valid_results:
+        if verbose:
+            print(f"  ⚠️  No valid rotation angles found in fine search, using coarse: {coarse_angle:+.1f}°")
+        return coarse_angle, results
+
+    best_result = max(valid_results, key=lambda x: x['score'])
+    best_angle = best_result['angle']
+
+    if verbose:
+        print(f"  ✓ Fine best: {best_angle:+.2f}° (score: {best_result['score']:.2f}, variance: {best_result['variance']:.2f})")
+
+    return best_angle, results
+
+
+def find_optimal_rotation_z_contour(overlap_v0, overlap_v1, coarse_range=20, coarse_step=1,
+                                    fine_range=3, fine_step=0.5, verbose=True):
+    """
+    Find optimal Z-rotation angle using contour-based surface alignment.
+
+    Two-stage coarse-to-fine search:
+    1. Coarse: Test angles from -coarse_range to +coarse_range
+    2. Fine: Refine around coarse optimum with finer steps
+
+    Args:
+        overlap_v0: Reference overlap volume (Y, X, Z)
+        overlap_v1: Moving overlap volume (Y, X, Z)
+        coarse_range: Coarse search range (±degrees)
+        coarse_step: Coarse step size (degrees)
+        fine_range: Fine search range around coarse optimum (±degrees)
+        fine_step: Fine step size (degrees)
+        verbose: Print progress information
+
+    Returns:
+        optimal_angle: Best rotation angle in degrees
+        metrics: Dictionary with search results and metrics
+    """
+    if verbose:
+        print("\n" + "="*70)
+        print("CONTOUR-BASED Z-ROTATION SEARCH")
+        print("="*70)
+        print(f"  Method: Surface contour variance minimization")
+        print(f"  Overlap volume shape: {overlap_v0.shape}")
+
+    # Stage 1: Coarse search
+    coarse_angle, coarse_results = find_optimal_rotation_z_contour_coarse(
+        overlap_v0, overlap_v1,
+        angle_range=coarse_range,
+        step=coarse_step,
+        verbose=verbose
+    )
+
+    # Stage 2: Fine search
+    fine_angle, fine_results = find_optimal_rotation_z_contour_fine(
+        overlap_v0, overlap_v1,
+        coarse_angle=coarse_angle,
+        angle_range=fine_range,
+        step=fine_step,
+        verbose=verbose
+    )
+
+    optimal_angle = fine_angle
+
+    # Get best result details
+    best_fine = max([r for r in fine_results if r['score'] > -np.inf],
+                   key=lambda x: x['score'], default=None)
+
+    if verbose:
+        print("\n" + "="*70)
+        print(f"  OPTIMAL ROTATION: {optimal_angle:+.2f}°")
+        if best_fine:
+            print(f"  Surface variance: {best_fine['variance']:.2f} px²")
+            print(f"  Valid pixels: {best_fine['valid_pixels']}")
+        print("="*70)
+
+    metrics = {
+        'optimal_angle': float(optimal_angle),
+        'optimal_score': float(best_fine['score']) if best_fine else -np.inf,
+        'optimal_variance': float(best_fine['variance']) if best_fine else np.inf,
+        'coarse_results': coarse_results,
+        'fine_results': fine_results,
+        'method': 'contour_variance'
+    }
+
+    return optimal_angle, metrics
+
+
+def visualize_rotation_angle_with_contours(result, bscan_v0, bscan_v1, all_results, output_path):
+    """
+    Visualize a single rotation angle with contour overlays.
+
+    Creates a 2x3 grid showing:
+    - Row 1: Original B-scans, rotated B-scan, overlay
+    - Row 2: Denoised + contours, surface difference plot
+    - Bottom: Angle info, score, score history graph
+
+    Args:
+        result: Result dictionary from _test_single_rotation_angle_contour()
+        bscan_v0: Original reference B-scan
+        bscan_v1: Original moving B-scan
+        all_results: List of all tested angle results (for score history)
+        output_path: Path to save visualization
+    """
+    angle = result['angle']
+    score = result['score']
+    variance = result['variance']
+    valid_pixels = result['valid_pixels']
+    surface_v0 = result.get('surface_v0')
+    surface_v1 = result.get('surface_v1')
+    mask_columns = result.get('mask_columns')
+    bscan_v0_denoised = result.get('bscan_v0_denoised')
+    bscan_v1_denoised = result.get('bscan_v1_denoised')
+
+    # Rotate the original B-scan for visualization
+    bscan_v1_rotated = ndimage.rotate(
+        bscan_v1, angle, axes=(0, 1),
+        reshape=False, order=1,
+        mode='constant', cval=0
+    )
+
+    fig = plt.figure(figsize=(18, 10))
+    gs = fig.add_gridspec(3, 3, height_ratios=[1, 1, 0.4], hspace=0.3, wspace=0.3)
+
+    # Row 1: Original B-scans
+    # 1.1: Reference B-scan
+    ax1 = fig.add_subplot(gs[0, 0])
+    ax1.imshow(bscan_v0, cmap='gray', aspect='auto')
+    ax1.set_title(f'Reference B-scan (V0)', fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Y (depth)', fontsize=10)
+    ax1.set_xlabel('X (lateral)', fontsize=10)
+
+    # 1.2: Rotated B-scan
+    ax2 = fig.add_subplot(gs[0, 1])
+    ax2.imshow(bscan_v1_rotated, cmap='gray', aspect='auto')
+    ax2.set_title(f'Moving B-scan Rotated ({angle:+.2f}°)', fontsize=12, fontweight='bold')
+    ax2.set_xlabel('X (lateral)', fontsize=10)
+
+    # 1.3: Overlay (Red/Green)
+    ax3 = fig.add_subplot(gs[0, 2])
+    overlay = np.zeros((*bscan_v0.shape, 3), dtype=np.uint8)
+    overlay[:, :, 0] = (bscan_v0 / bscan_v0.max() * 255).astype(np.uint8)  # Red: V0
+    overlay[:, :, 1] = (bscan_v1_rotated / (bscan_v1_rotated.max() + 1e-8) * 255).astype(np.uint8)  # Green: V1
+    ax3.imshow(overlay, aspect='auto')
+    ax3.set_title('Overlay (Red=V0, Green=V1)', fontsize=12, fontweight='bold')
+    ax3.set_xlabel('X (lateral)', fontsize=10)
+
+    # Row 2: Denoised + Contours
+    if bscan_v0_denoised is not None and bscan_v1_denoised is not None:
+        # 2.1: V0 denoised + contour
+        ax4 = fig.add_subplot(gs[1, 0])
+        ax4.imshow(bscan_v0_denoised, cmap='gray', aspect='auto')
+        if surface_v0 is not None and mask_columns is not None:
+            # Plot contour only for valid columns
+            x_coords = np.where(mask_columns)[0]
+            y_coords = surface_v0[mask_columns]
+            # Remove NaN values
+            valid_mask = ~np.isnan(y_coords)
+            ax4.plot(x_coords[valid_mask], y_coords[valid_mask], 'r-', linewidth=2, label='Surface V0')
+            ax4.legend(loc='upper right', fontsize=9)
+        ax4.set_title('V0 Denoised + Surface', fontsize=12, fontweight='bold')
+        ax4.set_ylabel('Y (depth)', fontsize=10)
+        ax4.set_xlabel('X (lateral)', fontsize=10)
+
+        # 2.2: V1 denoised + contour
+        ax5 = fig.add_subplot(gs[1, 1])
+        ax5.imshow(bscan_v1_denoised, cmap='gray', aspect='auto')
+        if surface_v1 is not None and mask_columns is not None:
+            x_coords = np.where(mask_columns)[0]
+            y_coords = surface_v1[mask_columns]
+            valid_mask = ~np.isnan(y_coords)
+            ax5.plot(x_coords[valid_mask], y_coords[valid_mask], 'g-', linewidth=2, label='Surface V1')
+            ax5.legend(loc='upper right', fontsize=9)
+        ax5.set_title(f'V1 Denoised + Surface ({angle:+.2f}°)', fontsize=12, fontweight='bold')
+        ax5.set_xlabel('X (lateral)', fontsize=10)
+
+        # 2.3: Surface difference plot
+        ax6 = fig.add_subplot(gs[1, 2])
+        if surface_v0 is not None and surface_v1 is not None and mask_columns is not None:
+            x_coords = np.arange(len(surface_v0))
+            diff = surface_v0 - surface_v1
+
+            # Plot surface difference
+            ax6.plot(x_coords[mask_columns], diff[mask_columns], 'b-', linewidth=1.5, label='Surface Difference')
+            ax6.axhline(0, color='k', linestyle='--', linewidth=1, alpha=0.5)
+            ax6.fill_between(x_coords[mask_columns], 0, diff[mask_columns], alpha=0.3)
+            ax6.set_xlabel('X (lateral)', fontsize=10)
+            ax6.set_ylabel('Difference (px)', fontsize=10)
+            ax6.set_title(f'Surface Difference (Variance: {variance:.2f} px²)', fontsize=12, fontweight='bold')
+            ax6.legend(loc='upper right', fontsize=9)
+            ax6.grid(True, alpha=0.3)
+        else:
+            ax6.text(0.5, 0.5, 'No surface data', ha='center', va='center', fontsize=14)
+            ax6.set_title('Surface Difference', fontsize=12, fontweight='bold')
+
+    # Row 3: Score history and info
+    ax7 = fig.add_subplot(gs[2, :])
+
+    # Plot score vs angle
+    if all_results:
+        angles = [r['angle'] for r in all_results if r['score'] > -np.inf]
+        scores = [r['score'] for r in all_results if r['score'] > -np.inf]
+
+        if angles:
+            ax7.plot(angles, scores, 'b-', linewidth=2, label='Alignment Score')
+            ax7.scatter(angles, scores, c='blue', s=30, alpha=0.6, zorder=3)
+            # Highlight current angle
+            if score > -np.inf:
+                ax7.scatter([angle], [score], c='red', s=200, marker='*',
+                           edgecolors='black', linewidths=2, zorder=4, label='Current Angle')
+            ax7.set_xlabel('Rotation Angle (degrees)', fontsize=11, fontweight='bold')
+            ax7.set_ylabel('Score (higher = better)', fontsize=11, fontweight='bold')
+            ax7.set_title('Rotation Search Results', fontsize=12, fontweight='bold')
+            ax7.grid(True, alpha=0.3)
+            ax7.legend(loc='best', fontsize=10)
+        else:
+            ax7.text(0.5, 0.5, 'No valid results', ha='center', va='center', fontsize=14)
+
+    # Add info text
+    ncc_score = result.get('ncc_score', 'N/A')
+    ncc_text = f"{ncc_score:.4f}" if isinstance(ncc_score, (int, float)) else ncc_score
+
+    info_text = f"""
+Angle: {angle:+.2f}°
+Contour Score: {score:.2f}
+Variance: {variance:.2f} px²
+NCC Score: {ncc_text}
+Valid Pixels: {valid_pixels}
+    """.strip()
+
+    fig.text(0.02, 0.02, info_text, fontsize=11, family='monospace',
+             bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
+
+    plt.savefig(output_path, dpi=120, bbox_inches='tight')
+    plt.close()
+
+
+def create_rotation_search_summary(coarse_results, fine_results, optimal_angle, output_path):
+    """
+    Create summary visualization showing score vs. angle for all tested angles.
+
+    Args:
+        coarse_results: List of coarse search results
+        fine_results: List of fine search results
+        optimal_angle: Optimal rotation angle found
+        output_path: Path to save visualization
+    """
+    fig, axes = plt.subplots(2, 3, figsize=(20, 12))
+    fig.suptitle('Z-Rotation Search Summary (Contour + NCC Comparison)', fontsize=16, fontweight='bold')
+
+    # Extract data
+    coarse_angles = [r['angle'] for r in coarse_results if r['score'] > -np.inf]
+    coarse_scores = [r['score'] for r in coarse_results if r['score'] > -np.inf]
+    coarse_variances = [r['variance'] for r in coarse_results if r['variance'] < np.inf]
+    coarse_ncc = [r.get('ncc_score', -np.inf) for r in coarse_results if r['score'] > -np.inf]
+
+    fine_angles = [r['angle'] for r in fine_results if r['score'] > -np.inf]
+    fine_scores = [r['score'] for r in fine_results if r['score'] > -np.inf]
+    fine_variances = [r['variance'] for r in fine_results if r['variance'] < np.inf]
+    fine_ncc = [r.get('ncc_score', -np.inf) for r in fine_results if r['score'] > -np.inf]
+
+    # 1. Coarse search: Variance vs Angle (Lower = Better)
+    ax1 = axes[0, 0]
+    if coarse_angles and coarse_variances:
+        ax1.plot(coarse_angles, coarse_variances, 'b-', linewidth=2, marker='o', markersize=6)
+        best_idx = np.argmin(coarse_variances)
+        ax1.scatter([coarse_angles[best_idx]], [coarse_variances[best_idx]],
+                   c='red', s=200, marker='*', edgecolors='black', linewidths=2, zorder=5, label='Best')
+        ax1.set_xlabel('Rotation Angle (degrees)', fontsize=12)
+        ax1.set_ylabel('Surface Variance (px²)', fontsize=12)
+        ax1.set_title('Coarse: Variance vs Angle (LOWER=BETTER)', fontsize=13, fontweight='bold')
+        ax1.grid(True, alpha=0.3)
+        ax1.legend(fontsize=10)
+        ax1.axvline(0, color='k', linestyle=':', alpha=0.5)
+
+    # 2. Coarse search: NCC vs Angle (Higher = Better)
+    ax2 = axes[0, 1]
+    if coarse_angles and coarse_ncc:
+        valid_ncc = [ncc for ncc in coarse_ncc if ncc > -np.inf]
+        if valid_ncc:
+            ax2.plot(coarse_angles[:len(valid_ncc)], valid_ncc, 'g-', linewidth=2, marker='o', markersize=6)
+            best_idx = np.argmax(valid_ncc)
+            ax2.scatter([coarse_angles[best_idx]], [valid_ncc[best_idx]],
+                       c='red', s=200, marker='*', edgecolors='black', linewidths=2, zorder=5, label='Best')
+            ax2.set_xlabel('Rotation Angle (degrees)', fontsize=12)
+            ax2.set_ylabel('NCC Score', fontsize=12)
+            ax2.set_title('Coarse: NCC vs Angle (HIGHER=BETTER)', fontsize=13, fontweight='bold')
+            ax2.grid(True, alpha=0.3)
+            ax2.legend(fontsize=10)
+            ax2.axvline(0, color='k', linestyle=':', alpha=0.5)
+
+    # 3. Coarse search: Contour Score vs Angle (Higher = Better, = -variance)
+    ax3 = axes[0, 2]
+    if coarse_angles and coarse_scores:
+        ax3.plot(coarse_angles, coarse_scores, 'm-', linewidth=2, marker='o', markersize=6)
+        best_idx = np.argmax(coarse_scores)
+        ax3.scatter([coarse_angles[best_idx]], [coarse_scores[best_idx]],
+                   c='red', s=200, marker='*', edgecolors='black', linewidths=2, zorder=5, label='Best')
+        ax3.set_xlabel('Rotation Angle (degrees)', fontsize=12)
+        ax3.set_ylabel('Contour Score', fontsize=12)
+        ax3.set_title('Coarse: Contour Score vs Angle (HIGHER=BETTER)', fontsize=13, fontweight='bold')
+        ax3.grid(True, alpha=0.3)
+        ax3.legend(fontsize=10)
+        ax3.axvline(0, color='k', linestyle=':', alpha=0.5)
+
+    # 4. Fine search: Variance vs Angle
+    ax4 = axes[1, 0]
+    if fine_angles and fine_variances:
+        ax4.plot(fine_angles, fine_variances, 'b-', linewidth=2, marker='o', markersize=6)
+        best_idx = np.argmin(fine_variances)
+        ax4.scatter([fine_angles[best_idx]], [fine_variances[best_idx]],
+                   c='red', s=200, marker='*', edgecolors='black', linewidths=2, zorder=5, label='Optimal')
+        ax4.set_xlabel('Rotation Angle (degrees)', fontsize=12)
+        ax4.set_ylabel('Surface Variance (px²)', fontsize=12)
+        ax4.set_title(f'Fine: Variance vs Angle (Optimal: {optimal_angle:+.2f}°)', fontsize=13, fontweight='bold')
+        ax4.grid(True, alpha=0.3)
+        ax4.legend(fontsize=10)
+        ax4.axvline(0, color='k', linestyle=':', alpha=0.5)
+
+    # 5. Fine search: NCC vs Angle
+    ax5 = axes[1, 1]
+    if fine_angles and fine_ncc:
+        valid_ncc = [ncc for ncc in fine_ncc if ncc > -np.inf]
+        if valid_ncc:
+            ax5.plot(fine_angles[:len(valid_ncc)], valid_ncc, 'g-', linewidth=2, marker='o', markersize=6)
+            best_idx = np.argmax(valid_ncc)
+            ax5.scatter([fine_angles[best_idx]], [valid_ncc[best_idx]],
+                       c='red', s=200, marker='*', edgecolors='black', linewidths=2, zorder=5, label='Best NCC')
+            ax5.set_xlabel('Rotation Angle (degrees)', fontsize=12)
+            ax5.set_ylabel('NCC Score', fontsize=12)
+            ax5.set_title(f'Fine: NCC vs Angle (Optimal: {optimal_angle:+.2f}°)', fontsize=13, fontweight='bold')
+            ax5.grid(True, alpha=0.3)
+            ax5.legend(fontsize=10)
+            ax5.axvline(0, color='k', linestyle=':', alpha=0.5)
+
+    # 6. Fine search: Contour Score vs Angle
+    ax6 = axes[1, 2]
+    if fine_angles and fine_scores:
+        ax6.plot(fine_angles, fine_scores, 'm-', linewidth=2, marker='o', markersize=6)
+        best_idx = np.argmax(fine_scores)
+        ax6.scatter([fine_angles[best_idx]], [fine_scores[best_idx]],
+                   c='red', s=200, marker='*', edgecolors='black', linewidths=2, zorder=5, label='Optimal')
+        ax6.set_xlabel('Rotation Angle (degrees)', fontsize=12)
+        ax6.set_ylabel('Contour Score', fontsize=12)
+        ax6.set_title(f'Fine: Contour Score vs Angle (Optimal: {optimal_angle:+.2f}°)', fontsize=13, fontweight='bold')
+        ax6.grid(True, alpha=0.3)
+        ax6.legend(fontsize=10)
+        ax6.axvline(0, color='k', linestyle=':', alpha=0.5)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=120, bbox_inches='tight')
+    plt.close()
+
+    print(f"  ✓ Saved rotation search summary: {output_path.name}")
+
+
 if __name__ == "__main__":
     print("Rotation Alignment Module")
     print("=" * 70)
     print("Functions:")
-    print("  - find_optimal_rotation_z(): Coarse-to-fine rotation search (Hough)")
+    print("  - find_optimal_rotation_z(): Coarse-to-fine rotation search (NCC)")
+    print("  - find_optimal_rotation_z_contour(): Contour-based rotation search (NEW)")
     print("  - apply_rotation_z(): Apply rotation to volume")
     print("  - calculate_ncc_3d(): Calculate NCC metric (verification)")
     print("  - visualize_rotation_search(): Plot angle search results")

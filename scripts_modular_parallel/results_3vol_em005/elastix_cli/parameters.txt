@@ -1,0 +1,49 @@
+// Elastix Parameter File for 2D Translation Registration
+// Generated automatically for OCT volume alignment
+// Configured for large displacements (~100px Z-axis)
+
+(FixedInternalImagePixelType "float")
+(MovingInternalImagePixelType "float")
+(FixedImageDimension 2)
+(MovingImageDimension 2)
+(UseDirectionCosines "false")
+
+// Transform (NO automatic initialization - allows finding large displacements)
+(Transform "TranslationTransform")
+(AutomaticTransformInitialization "false")
+(AutomaticScalesEstimation "true")
+
+// Metric
+(Metric "AdvancedNormalizedCorrelation")
+(SubtractMean "true")
+(UseMultiThreadingForMetrics "false")
+
+// Optimizer (configured for LARGE displacements up to 200px)
+(Optimizer "AdaptiveStochasticGradientDescent")
+(AutomaticParameterEstimation "true")
+(UseAdaptiveStepSizes "true")
+(MaximumNumberOfIterations 512 512 256)
+(MaximumStepLength 200.0)
+(MinimumStepLength 0.1)
+
+// Multi-resolution
+(Registration "MultiResolutionRegistration")
+(NumberOfResolutions 3)
+(ImagePyramidSchedule 4 4  2 2  1 1)
+
+// Sampling (very conservative at coarse level for large displacements)
+(ImageSampler "Random")
+(NumberOfSpatialSamples 512 2048 4096)
+(NewSamplesEveryIteration "true")
+(MaximumNumberOfSamplingAttempts 5)
+(RequiredRatioOfValidSamples 0.10)
+
+// Interpolation
+(Interpolator "BSplineInterpolator")
+(BSplineInterpolationOrder 1)
+(FinalBSplineInterpolationOrder 3)
+
+// Output
+(WriteResultImage "false")
+(ResultImagePixelType "float")
+(ResultImageFormat "mha")

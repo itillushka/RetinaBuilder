@@ -11,11 +11,19 @@ import sys
 
 # Add parent directories to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from helpers.mip_generation import create_vessel_enhanced_mip, register_mip_phase_correlation
+from helpers.mip_generation import (
+    create_vessel_enhanced_mip,
+    register_mip_phase_correlation,
+    register_mip_phase_correlation_legacy,
+    register_mip_elastix_cli,
+    register_mip_ants,
+    register_mip_feature_based,
+    compare_registration_methods
+)
 from helpers.rotation_alignment_parallel import shift_volume_xz_parallel
 
 
-def perform_xz_alignment(ref_volume, mov_volume, max_offset_x=None, max_offset_z=None):
+def perform_xz_alignment(ref_volume, mov_volume, max_offset_x=None, max_offset_z=None, method='multiscale', output_dir=None, denoise=False, vessels_only=False, vessel_threshold=0.1):
     """
     XZ-alignment wrapper for multi-volume stitcher compatibility.
 
@@ -27,23 +35,112 @@ def perform_xz_alignment(ref_volume, mov_volume, max_offset_x=None, max_offset_z
         mov_volume: Volume to align (Y, X, Z)
         max_offset_x: Maximum allowed X-axis offset (±pixels). None = no limit.
         max_offset_z: Maximum allowed Z-axis offset (±pixels). None = no limit.
+        method: Registration method:
+            - 'multiscale': Multi-scale phase correlation (default, fast)
+            - 'ants': ANTs translation (robust for large displacements)
+            - 'sift': SIFT feature matching (accurate, medical images)
+            - 'orb': ORB feature matching (fastest)
+            - 'akaze': AKAZE feature matching (good compromise)
+            - 'compare': Run all methods and generate comparison chart
+            - 'elastix': Elastix CLI (currently failing)
+            - 'phase_corr': Legacy single-scale phase correlation
+        output_dir: Output directory for saving logs and comparison charts
+        denoise: Apply bilateral denoising after Frangi filter (default: False)
+        vessels_only: Use only vessel structures, suppress background (default: False)
+        vessel_threshold: Threshold for vessels_only mode (0-1, default: 0.1)
 
     Returns:
         dict containing:
             - 'volume_1_xz_aligned': XZ-aligned moving volume
             - 'offset_x', 'offset_z': Translation offsets
             - 'confidence': Registration confidence
+            - 'method': Actual method used (may differ if fallback occurred)
     """
-    # Create vessel-enhanced MIPs on-the-fly
-    mip_v0 = create_vessel_enhanced_mip(ref_volume)
-    mip_v1 = create_vessel_enhanced_mip(mov_volume)
+    # Create vessel-enhanced MIPs on-the-fly (with optional denoising/thresholding)
+    mip_v0 = create_vessel_enhanced_mip(ref_volume, verbose=False, denoise=denoise,
+                                        vessels_only=vessels_only, vessel_threshold=vessel_threshold)
+    mip_v1 = create_vessel_enhanced_mip(mov_volume, verbose=False, denoise=denoise,
+                                        vessels_only=vessels_only, vessel_threshold=vessel_threshold)
 
-    # Run phase correlation with constraints
-    (offset_x, offset_z), confidence, correlation_map = register_mip_phase_correlation(
-        mip_v0, mip_v1,
-        max_offset_x=max_offset_x,
-        max_offset_z=max_offset_z
-    )
+    # Run registration with selected method
+    if method == 'compare':
+        # Comparison mode: run all methods and generate chart
+        print("  Running COMPARISON MODE - testing all methods...")
+        if output_dir:
+            from pathlib import Path
+            comparison_path = Path(output_dir) / 'registration_method_comparison.png'
+        else:
+            comparison_path = 'registration_method_comparison.png'
+
+        results = compare_registration_methods(mip_v0, mip_v1, output_path=str(comparison_path))
+
+        # Use the best method (highest confidence among successful methods)
+        successful = {k: v for k, v in results.items() if v['success']}
+        if not successful:
+            raise RuntimeError("All registration methods failed in comparison mode!")
+
+        best_method = max(successful, key=lambda k: successful[k]['confidence'])
+        print(f"\n[COMPARISON] Best method: {best_method.upper()} "
+              f"(confidence: {successful[best_method]['confidence']:.3f})")
+
+        offset_x = successful[best_method]['offset_x']
+        offset_z = successful[best_method]['offset_z']
+        confidence = successful[best_method]['confidence']
+        method = best_method  # Update method to actual method used
+
+    elif method == 'ants':
+        try:
+            print("  Using ANTs Translation Registration (robust, handles large displacements)...")
+            (offset_x, offset_z), confidence, correlation_map = register_mip_ants(
+                mip_v0, mip_v1,
+                max_offset_x=max_offset_x,
+                max_offset_z=max_offset_z
+            )
+        except (ImportError, RuntimeError, Exception) as e:
+            print(f"  [WARNING] ANTs failed ({e}), falling back to SIFT...")
+            method = 'sift'
+
+    if method in ['sift', 'orb', 'akaze']:
+        try:
+            print(f"  Using {method.upper()} Feature-Based Registration...")
+            (offset_x, offset_z), confidence, correlation_map = register_mip_feature_based(
+                mip_v0, mip_v1,
+                max_offset_x=max_offset_x,
+                max_offset_z=max_offset_z,
+                method=method,
+                min_matches=5  # Lower threshold for vessel-enhanced MIPs
+            )
+        except (RuntimeError, Exception) as e:
+            print(f"  [WARNING] {method.upper()} failed ({e}), falling back to multiscale...")
+            method = 'multiscale'
+
+    if method == 'elastix':
+        try:
+            print("  Using Elastix Command-Line Tool (production-grade, most reliable)...")
+            (offset_x, offset_z), confidence, correlation_map = register_mip_elastix_cli(
+                mip_v0, mip_v1,
+                max_offset_x=max_offset_x,
+                max_offset_z=max_offset_z,
+                output_dir=output_dir
+            )
+        except (FileNotFoundError, RuntimeError, Exception) as e:
+            print(f"  [WARNING] Elastix-CLI failed ({e}), falling back to multiscale...")
+            method = 'multiscale'
+
+    if method == 'phase_corr':
+        print("  Using Legacy Phase Correlation (single-scale FFT)...")
+        (offset_x, offset_z), confidence, correlation_map = register_mip_phase_correlation_legacy(
+            mip_v0, mip_v1,
+            max_offset_x=max_offset_x,
+            max_offset_z=max_offset_z
+        )
+    elif method == 'multiscale':
+        print("  Using Multi-Scale Phase Correlation (modern, fast, robust)...")
+        (offset_x, offset_z), confidence, correlation_map = register_mip_phase_correlation(
+            mip_v0, mip_v1,
+            max_offset_x=max_offset_x,
+            max_offset_z=max_offset_z
+        )
 
     # Apply shift using PARALLEL method
     volume_1_xz_aligned = shift_volume_xz_parallel(
@@ -54,7 +151,8 @@ def perform_xz_alignment(ref_volume, mov_volume, max_offset_x=None, max_offset_z
         'volume_1_xz_aligned': volume_1_xz_aligned,
         'offset_x': offset_x,
         'offset_z': offset_z,
-        'confidence': confidence
+        'confidence': confidence,
+        'method': method
     }
 
 
@@ -93,8 +191,8 @@ def step1_xz_alignment(volume_0, volume_1, data_dir):
     else:
         print("  Pre-computed MIPs not found. Creating Vessel-Enhanced MIPs (Frangi filter)...")
         print("  This may take 2-3 minutes per volume...")
-        mip_v0 = create_vessel_enhanced_mip(volume_0)
-        mip_v1 = create_vessel_enhanced_mip(volume_1)
+        mip_v0 = create_vessel_enhanced_mip(volume_0, verbose=True, denoise=False)
+        mip_v1 = create_vessel_enhanced_mip(volume_1, verbose=True, denoise=False)
 
         # Save for future use
         print("  Saving MIPs for future use...")

@@ -169,7 +169,9 @@ def perform_y_alignment(ref_volume, mov_volume):
     ncc_offset, ncc_scores, offsets_tested = ncc_search_y_offset(bscan_ref, bscan_mov, search_range=50)
 
     # Use contour offset as primary (more reliable for surface alignment)
-    y_shift = contour_offset
+    # NOTE: Invert sign when applying - if ref surface is above mov surface (negative offset),
+    # we need to shift mov DOWN (positive shift)
+    y_shift = -contour_offset  # INVERTED SIGN
 
     # Apply Y-shift to full volume using PARALLEL method
     # (NO 2.0x multiplier - that's only for visualization)
@@ -179,7 +181,7 @@ def perform_y_alignment(ref_volume, mov_volume):
 
     return {
         'volume_1_y_aligned': volume_1_y_aligned,
-        'y_shift': float(y_shift),
+        'y_shift': float(y_shift),  # Store the inverted shift that was actually applied
         'contour_y_offset': float(contour_offset),
         'ncc_y_offset': float(ncc_offset)
     }
@@ -253,7 +255,8 @@ def step2_y_alignment(step1_results, data_dir):
         print(f"   [WARNING] Methods differ by {offset_diff:.1f} px - Using contour (more reliable for surface alignment)")
 
     # Use contour offset as primary (directly aligns retinal surfaces)
-    y_shift = contour_offset
+    # NOTE: Invert sign when applying the shift
+    y_shift = -contour_offset  # INVERTED SIGN
 
     print(f"\n5. Applying Y-shift: {y_shift:+.2f} px (PARALLEL)...")
 

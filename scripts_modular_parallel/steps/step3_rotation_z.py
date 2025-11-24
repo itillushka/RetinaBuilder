@@ -17,6 +17,9 @@ try:
     from helpers.rotation_alignment import (
         calculate_ncc_3d,
         find_optimal_rotation_z,
+        find_optimal_rotation_z_contour,  # NEW: Contour-based rotation
+        visualize_rotation_angle_with_contours,  # NEW: Contour visualization
+        create_rotation_search_summary,  # NEW: Summary visualization
         apply_rotation_z,
         find_optimal_y_shift_central_bscan,
         visualize_contour_y_alignment
@@ -31,10 +34,11 @@ except ImportError:
     print("⚠️  Warning: rotation_alignment module not available")
 
 
-def perform_z_rotation_alignment(ref_volume, mov_volume, visualize=False, position=None):
+def perform_z_rotation_alignment(ref_volume, mov_volume, visualize=False, position=None, output_dir=None, vis_interval=1):
     """
-    Position-aware rotation alignment wrapper for multi-volume stitcher compatibility.
+    Position-aware rotation alignment wrapper using CONTOUR-BASED method.
 
+    Uses surface contour variance minimization instead of NCC correlation.
     Rotates around appropriate axis based on volume position:
     - Horizontal volumes (left/right): Z-rotation (YX plane)
     - Vertical volumes (up/down): X-rotation (YZ plane)
@@ -45,6 +49,8 @@ def perform_z_rotation_alignment(ref_volume, mov_volume, visualize=False, positi
         visualize: Whether to generate visualizations (default: False)
         position: Volume position ('right', 'left', 'up', 'down', etc.)
                  Used to select appropriate rotation axis
+        output_dir: Directory to save visualizations (required if visualize=True)
+        vis_interval: Visualize every N angles (default: 1 = all angles for debugging)
 
     Returns:
         dict containing:
@@ -52,13 +58,15 @@ def perform_z_rotation_alignment(ref_volume, mov_volume, visualize=False, positi
             - 'rotation_angle': Optimal rotation angle (degrees)
             - 'ncc_after': NCC score after rotation
             - 'rotation_axes': The axes used for rotation
+            - 'variance': Surface difference variance at optimal angle
     """
     if not ROTATION_AVAILABLE:
         return {
             'volume_1_rotated': None,
             'rotation_angle': 0.0,
             'ncc_after': 0.0,
-            'rotation_axes': (0, 1)
+            'rotation_axes': (0, 1),
+            'variance': np.inf
         }
 
     # Get rotation axes based on position
@@ -66,25 +74,35 @@ def perform_z_rotation_alignment(ref_volume, mov_volume, visualize=False, positi
     rotation_axes = get_rotation_axes_for_position(position)
 
     print(f"  Position '{position}': Using rotation axes {rotation_axes}")
+    print(f"  Method: NCC correlation-based alignment")
 
-    # Find optimal rotation angle using full volumes
-    # Note: find_optimal_rotation_z searches in 2D, so works for any axes
+    # Find optimal rotation angle using NCC method (original)
     rotation_angle, rotation_metrics = find_optimal_rotation_z(
         ref_volume,
         mov_volume,
-        coarse_range=15,
+        coarse_range=15,  # Test ±15° as requested
         coarse_step=1,
         fine_range=3,
         fine_step=0.5,
-        verbose=False
+        verbose=True  # Enable verbose for debugging
     )
 
+    # Extract central B-scan for visualization
+    Z = ref_volume.shape[2]
+    z_mid = Z // 2
+    bscan_v0 = ref_volume[:, :, z_mid]
+    bscan_v1 = mov_volume[:, :, z_mid]
+
+    # Note: NCC method visualization can be added later if needed
+    # For now, NCC method works as before without detailed per-angle visualization
+
     # Apply rotation if significant (> 0.5 degrees)
+    # NOTE: Invert the angle when applying (same logic as Y-shift inversion)
     if abs(rotation_angle) > 0.5:
-        # Apply rotation with position-specific axes
+        # Apply rotation with position-specific axes (INVERTED)
         volume_1_rotated = ndimage.rotate(
             mov_volume,
-            angle=rotation_angle,
+            angle=-rotation_angle,  # INVERTED SIGN
             axes=rotation_axes,
             reshape=False,
             order=1,
@@ -92,7 +110,8 @@ def perform_z_rotation_alignment(ref_volume, mov_volume, visualize=False, positi
             cval=0
         )
         ncc_after = calculate_ncc_3d(ref_volume, volume_1_rotated)
-        print(f"  Applied {rotation_angle:.2f}° rotation around axes {rotation_axes}")
+        print(f"  Applied {-rotation_angle:.2f}° rotation around axes {rotation_axes} (inverted)")
+        print(f"  NCC correlation at optimal: {rotation_metrics.get('optimal_correlation', 'N/A')}")
     else:
         volume_1_rotated = None
         ncc_after = calculate_ncc_3d(ref_volume, mov_volume)

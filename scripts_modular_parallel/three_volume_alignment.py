@@ -35,6 +35,7 @@ from helpers.step_visualization import visualize_three_volume_mips
 # Import step modules for alignment functions
 from steps.step1_xz_alignment import perform_xz_alignment
 from steps.step2_y_alignment import perform_y_alignment
+from steps.step3_rotation_z import perform_z_rotation_alignment
 
 
 def merge_two_volumes(volume_ref, volume_mov_aligned, xz_results, y_results):
@@ -183,9 +184,13 @@ Examples:
 
     # XZ alignment (volume 2 to volume 1)
     print("\n[1.1] XZ Alignment (Volume 2 → Volume 1)...")
-    xz_results_v2 = perform_xz_alignment(volume_1, volume_2, max_offset_x=15)
+    xz_results_v2 = perform_xz_alignment(volume_1, volume_2,
+                                         max_offset_z=15,  # Limit Z-axis to ±15px
+                                         method='phase_corr',  # Classic phase correlation
+                                         output_dir=data_dir)
     print(f"  ✓ XZ Offset: dx={xz_results_v2['offset_x']}, dz={xz_results_v2['offset_z']}")
     print(f"  ✓ Confidence: {xz_results_v2['confidence']:.3f}")
+    print(f"  ✓ Method: {xz_results_v2['method']}")
 
     # Y alignment (volume 2 to volume 1)
     print("\n[1.2] Y Alignment (Volume 2 → Volume 1)...")
@@ -197,14 +202,29 @@ Examples:
     print(f"  ✓ Contour offset: {y_results_v2['contour_y_offset']:.2f} px")
     print(f"  ✓ NCC offset: {y_results_v2['ncc_y_offset']:.2f} px")
 
+    # Z-rotation alignment (volume 2 to volume 1)
+    print("\n[1.3] Z-Rotation Alignment (Volume 2 → Volume 1)...")
+    step3_results_v2 = perform_z_rotation_alignment(
+        volume_1,
+        y_results_v2['volume_1_y_aligned'],
+        visualize=args.visual,
+        position='right',  # V2 is to the right of V1
+        output_dir=data_dir,
+        vis_interval=5
+    )
+    print(f"  ✓ Rotation angle: {step3_results_v2['rotation_angle']:+.3f}°")
+    print(f"  ✓ NCC after rotation: {step3_results_v2['ncc_after']:.4f}")
+
     step1_time = time.time() - step1_start
     print(f"\n⏱️  Step 1 time: {step1_time:.2f} seconds")
 
     # Save intermediate results
     np.save(data_dir / 'step1_v2_to_v1_xz_results.npy', xz_results_v2)
     np.save(data_dir / 'step1_v2_to_v1_y_results.npy', y_results_v2)
+    np.save(data_dir / 'step1_v2_to_v1_rotation_results.npy', step3_results_v2)
     print(f"  [SAVED] step1_v2_to_v1_xz_results.npy")
     print(f"  [SAVED] step1_v2_to_v1_y_results.npy")
+    print(f"  [SAVED] step1_v2_to_v1_rotation_results.npy")
 
     # ========================================================================
     # STEP 2: MERGE VOLUMES 1 AND 2
@@ -221,7 +241,7 @@ Examples:
         volume_2,
         xz_results_v2,
         y_results_v2,
-        step3_results=None  # No rotation for V2→V1
+        step3_results=step3_results_v2  # Include rotation
     )
     print(f"  ✓ Volume 2 transformed: {volume_2_aligned.shape}")
 
@@ -279,9 +299,13 @@ Examples:
 
     # XZ alignment (volume 3 to volume 2)
     print("\n[3.1] XZ Alignment (Volume 3 → Volume 2)...")
-    xz_results_v3 = perform_xz_alignment(volume_2, volume_3, max_offset_x=15)
+    xz_results_v3 = perform_xz_alignment(volume_2, volume_3,
+                                         max_offset_z=15,  # Limit Z-axis to ±15px
+                                         method='phase_corr',  # Classic phase correlation
+                                         output_dir=data_dir)
     print(f"  ✓ XZ Offset: dx={xz_results_v3['offset_x']}, dz={xz_results_v3['offset_z']}")
     print(f"  ✓ Confidence: {xz_results_v3['confidence']:.3f}")
+    print(f"  ✓ Method: {xz_results_v3['method']}")
 
     # Y alignment (volume 3 to volume 2)
     print("\n[3.2] Y Alignment (Volume 3 → Volume 2)...")
@@ -293,14 +317,29 @@ Examples:
     print(f"  ✓ Contour offset: {y_results_v3['contour_y_offset']:.2f} px")
     print(f"  ✓ NCC offset: {y_results_v3['ncc_y_offset']:.2f} px")
 
+    # Z-rotation alignment (volume 3 to volume 2)
+    print("\n[3.3] Z-Rotation Alignment (Volume 3 → Volume 2)...")
+    step3_results_v3 = perform_z_rotation_alignment(
+        volume_2,
+        y_results_v3['volume_1_y_aligned'],
+        visualize=args.visual,
+        position='right',  # V3 is to the right of V2
+        output_dir=data_dir,
+        vis_interval=5
+    )
+    print(f"  ✓ Rotation angle: {step3_results_v3['rotation_angle']:+.3f}°")
+    print(f"  ✓ NCC after rotation: {step3_results_v3['ncc_after']:.4f}")
+
     step3_time = time.time() - step3_start
     print(f"\n⏱️  Step 3 time: {step3_time:.2f} seconds")
 
     # Save intermediate results
     np.save(data_dir / 'step3_v3_to_v2_xz_results.npy', xz_results_v3)
     np.save(data_dir / 'step3_v3_to_v2_y_results.npy', y_results_v3)
+    np.save(data_dir / 'step3_v3_to_v2_rotation_results.npy', step3_results_v3)
     print(f"  [SAVED] step3_v3_to_v2_xz_results.npy")
     print(f"  [SAVED] step3_v3_to_v2_y_results.npy")
+    print(f"  [SAVED] step3_v3_to_v2_rotation_results.npy")
 
     # Apply transformations to ORIGINAL volume_3 for later use
     print("\n  Applying V3→V2 transformations to volume_3...")
@@ -308,7 +347,7 @@ Examples:
         volume_3,
         xz_results_v3,
         y_results_v3,
-        step3_results=None  # No rotation for V3→V2
+        step3_results=step3_results_v3  # Include rotation
     )
     print(f"  ✓ Volume 3 transformed (V3→V2): {volume_3_aligned_v2.shape}")
 
@@ -355,10 +394,11 @@ Examples:
     combined_offset_x = xz_results_v3['offset_x'] + xz_results_v2['offset_x']
     combined_offset_z = xz_results_v3['offset_z'] + xz_results_v2['offset_z']
     combined_y_shift = y_results_v3['y_shift'] + y_results_v2['y_shift']
+    combined_rotation = step3_results_v3['rotation_angle'] + step3_results_v2['rotation_angle']
 
-    print(f"    V3→V2: dx={xz_results_v3['offset_x']}, dz={xz_results_v3['offset_z']}, dy={y_results_v3['y_shift']:.1f}")
-    print(f"    V2→V1: dx={xz_results_v2['offset_x']}, dz={xz_results_v2['offset_z']}, dy={y_results_v2['y_shift']:.1f}")
-    print(f"    Combined: dx={combined_offset_x}, dz={combined_offset_z}, dy={combined_y_shift:.1f}")
+    print(f"    V3→V2: dx={xz_results_v3['offset_x']}, dz={xz_results_v3['offset_z']}, dy={y_results_v3['y_shift']:.1f}, rot={step3_results_v3['rotation_angle']:+.3f}°")
+    print(f"    V2→V1: dx={xz_results_v2['offset_x']}, dz={xz_results_v2['offset_z']}, dy={y_results_v2['y_shift']:.1f}, rot={step3_results_v2['rotation_angle']:+.3f}°")
+    print(f"    Combined: dx={combined_offset_x}, dz={combined_offset_z}, dy={combined_y_shift:.1f}, rot={combined_rotation:+.3f}°")
 
     # Apply COMBINED transforms to ORIGINAL volume_3
     print("\n  Applying combined transforms to volume_3...")
@@ -374,12 +414,18 @@ Examples:
         'ncc_y_offset': combined_y_shift
     }
 
+    combined_rotation_results = {
+        'rotation_angle': combined_rotation,
+        'ncc_after': (step3_results_v3['ncc_after'] + step3_results_v2['ncc_after']) / 2.0,
+        'rotation_axes': step3_results_v3['rotation_axes']  # Use same axes as V3
+    }
+
     # Apply combined transforms to original volume_3
     volume_3_aligned_final = apply_all_transformations_to_volume(
         volume_3,
         combined_xz_results,
         combined_y_results,
-        step3_results=None  # No rotation
+        step3_results=combined_rotation_results  # Include combined rotation
     )
     print(f"  ✓ Volume 3 transformed (combined): {volume_3_aligned_final.shape}")
 

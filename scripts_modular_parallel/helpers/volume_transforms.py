@@ -102,6 +102,7 @@ def apply_all_transformations_to_volume(volume_1_original, step1_results, step2_
     offset_z = step1_results['offset_z']
     y_shift = step2_results['y_shift']
     rotation_angle_z = step3_results['rotation_angle'] if step3_results else 0.0
+    rotation_axes = step3_results.get('rotation_axes', (0, 1)) if step3_results else (0, 1)
     y_shift_correction = step3_results.get('y_shift_correction', 0.0) if step3_results else 0.0
 
     # Calculate needed canvas expansion to avoid clipping
@@ -155,12 +156,13 @@ def apply_all_transformations_to_volume(volume_1_original, step1_results, step2_
     print(f"      ⏱️  {time.time() - t_start:.2f}s")
 
     # Step 3: Z-rotation (reshape=False, using pre-expanded canvas) - PARALLEL
-    print(f"  [3] Applying Z-rotation: {rotation_angle_z:+.2f}° (PARALLEL, pre-expanded canvas)")
+    # NOTE: Invert rotation angle when applying (same as Y-shift inversion)
+    print(f"  [3] Applying Z-rotation: {-rotation_angle_z:+.2f}° around axes {rotation_axes} (PARALLEL, pre-expanded canvas, inverted)")
     t_start = time.time()
     volume_1_transformed = apply_rotation_z_parallel(
         volume_1_transformed,
-        rotation_angle_z,
-        axes=(0, 1),  # Y-X plane
+        -rotation_angle_z,  # INVERTED SIGN
+        axes=rotation_axes,
         n_jobs=-1
     )
     print(f"      ⏱️  {time.time() - t_start:.2f}s")

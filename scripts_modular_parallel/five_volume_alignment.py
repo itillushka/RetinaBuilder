@@ -37,35 +37,6 @@ from steps.step2_y_alignment import perform_y_alignment
 from steps.step3_rotation_z import perform_z_rotation_alignment
 
 
-def match_intensity_to_reference(volume, ref_volume):
-    """
-    Match the intensity of volume to ref_volume using mean/std normalization.
-    Only considers non-zero voxels to avoid background skewing statistics.
-
-    Args:
-        volume: Volume to normalize
-        ref_volume: Reference volume (target intensity distribution)
-
-    Returns:
-        Normalized volume with intensity matched to reference
-    """
-    # Calculate statistics from non-zero regions only
-    vol_mask = volume > 0
-    ref_mask = ref_volume > 0
-
-    vol_mean = volume[vol_mask].mean()
-    vol_std = volume[vol_mask].std()
-    ref_mean = ref_volume[ref_mask].mean()
-    ref_std = ref_volume[ref_mask].std()
-
-    # Normalize: (x - mean) / std * ref_std + ref_mean
-    result = volume.copy().astype(np.float32)
-    result[vol_mask] = (volume[vol_mask] - vol_mean) / (vol_std + 1e-8) * ref_std + ref_mean
-    result = np.clip(result, 0, 255)
-
-    return result.astype(volume.dtype)
-
-
 def merge_two_volumes(volume_ref, volume_mov_aligned, xz_results, y_results):
     """
     Merge two aligned volumes into a single expanded volume.
@@ -105,37 +76,9 @@ def merge_two_volumes(volume_ref, volume_mov_aligned, xz_results, y_results):
     return merged_volume, metadata
 
 
-def load_cached_alignment(data_dir, prefix):
-    """
-    Load cached alignment results if they exist.
-
-    Args:
-        data_dir: Directory containing saved results
-        prefix: Prefix for saved files (e.g., 'phase1_v2_to_v1')
-
-    Returns:
-        (xz_results, y_results, rotation_results) if all files exist, else None
-    """
-    xz_path = data_dir / f'{prefix}_xz_results.npy'
-    y_path = data_dir / f'{prefix}_y_results.npy'
-    rot_path = data_dir / f'{prefix}_rotation_results.npy'
-
-    if xz_path.exists() and y_path.exists() and rot_path.exists():
-        try:
-            xz_results = np.load(xz_path, allow_pickle=True).item()
-            y_results = np.load(y_path, allow_pickle=True).item()
-            rotation_results = np.load(rot_path, allow_pickle=True).item()
-            return xz_results, y_results, rotation_results
-        except Exception as e:
-            print(f"  [WARN] Failed to load cached results: {e}")
-            return None
-    return None
-
-
 def align_volume_pair(ref_volume, mov_volume, position, data_dir, prefix, visualize=False):
     """
     Perform full alignment (XZ, Y, Rotation) between two volumes.
-    Loads from cache if available.
 
     Args:
         ref_volume: Reference volume
@@ -148,28 +91,6 @@ def align_volume_pair(ref_volume, mov_volume, position, data_dir, prefix, visual
     Returns:
         xz_results, y_results, rotation_results, aligned_volume
     """
-    # Check for cached results
-    cached = load_cached_alignment(data_dir, prefix)
-    if cached is not None:
-        xz_results, y_results, rotation_results = cached
-        print(f"\n  [CACHED] Loading saved alignment results...")
-        print(f"    ✓ XZ Offset: dx={xz_results['offset_x']}, dz={xz_results['offset_z']}")
-        print(f"    ✓ Y Shift: {y_results['y_shift']:.2f} px")
-        print(f"    ✓ Rotation angle: {rotation_results['rotation_angle']:+.3f}°")
-
-        # Apply transformations to original volume
-        print(f"\n  [Transform] Applying cached transformations...")
-        aligned_volume = apply_all_transformations_to_volume(
-            mov_volume,
-            xz_results,
-            y_results,
-            step3_results=rotation_results
-        )
-        print(f"    ✓ Aligned volume shape: {aligned_volume.shape}")
-
-        return xz_results, y_results, rotation_results, aligned_volume
-
-    # No cache - run alignment
     # XZ alignment
     print(f"\n  [XZ] XZ Alignment...")
     xz_results = perform_xz_alignment(
@@ -181,27 +102,50 @@ def align_volume_pair(ref_volume, mov_volume, position, data_dir, prefix, visual
     print(f"    ✓ XZ Offset: dx={xz_results['offset_x']}, dz={xz_results['offset_z']}")
     print(f"    ✓ Confidence: {xz_results['confidence']:.3f}")
 
-    # Y alignment
-    print(f"\n  [Y] Y Alignment...")
+    # Y alignment (using CROPPED overlap region for calculation)
+    print(f"\n  [Y] Y Alignment (overlap-cropped for calculation)...")
     y_results = perform_y_alignment(
         ref_volume,
-        xz_results['volume_1_xz_aligned']
+        xz_results['volume_1_xz_aligned'],
+        position=position,
+        offset_x=xz_results['offset_x'],
+        output_dir=data_dir,
+        prefix=prefix
     )
     print(f"    ✓ Y Shift: {y_results['y_shift']:.2f} px")
     print(f"    ✓ Contour: {y_results['contour_y_offset']:.2f} px, NCC: {y_results['ncc_y_offset']:.2f} px")
 
-    # Z-rotation alignment
-    print(f"\n  [Rotation] Z-Rotation Alignment (position='{position}')...")
+    # Z-rotation alignment (using CROPPED overlap region for calculation)
+    print(f"\n  [Rotation] Z-Rotation Alignment (position='{position}', overlap-cropped)...")
     rotation_results = perform_z_rotation_alignment(
         ref_volume,
         y_results['volume_1_y_aligned'],
         visualize=visualize,
         position=position,
         output_dir=data_dir,
-        vis_interval=5
+        vis_interval=5,
+        offset_x=xz_results['offset_x']
     )
     print(f"    ✓ Rotation angle: {rotation_results['rotation_angle']:+.3f}°")
     print(f"    ✓ NCC after rotation: {rotation_results['ncc_after']:.4f}")
+
+    # Step 3.1: Y-correction after rotation (uses ROTATED volumes, CROPPED to overlap)
+    print(f"\n  [Y-Correction] Step 3.1: Y-axis correction after rotation...")
+    # Use rotated volume if rotation was applied, otherwise use y-aligned volume
+    volume_after_rotation = rotation_results['volume_1_rotated'] if rotation_results['volume_1_rotated'] is not None else y_results['volume_1_y_aligned']
+
+    y_correction_results = perform_y_alignment(
+        ref_volume,
+        volume_after_rotation,
+        position=position,
+        offset_x=xz_results['offset_x'],
+        output_dir=data_dir,
+        prefix=f"{prefix}_step3_1"
+    )
+    print(f"    ✓ Y-Correction: {y_correction_results['y_shift']:+.2f} px")
+
+    # Store correction in rotation_results for apply_all_transformations
+    rotation_results['y_shift_correction'] = y_correction_results['y_shift']
 
     # Apply transformations to original volume
     print(f"\n  [Transform] Applying all transformations...")
@@ -474,16 +418,6 @@ Examples:
     print(f"\n  Volume loading time: {loading_time:.2f} seconds")
 
     # ========================================================================
-    # INTENSITY NORMALIZATION
-    # ========================================================================
-    print("\n  Normalizing volume intensities to V1...")
-    volume_2 = match_intensity_to_reference(volume_2, volume_1)
-    volume_3 = match_intensity_to_reference(volume_3, volume_1)
-    volume_4 = match_intensity_to_reference(volume_4, volume_1)
-    volume_5 = match_intensity_to_reference(volume_5, volume_1)
-    print("  ✓ All volumes normalized to V1 intensity")
-
-    # ========================================================================
     # PHASE 1: RIGHT CHAIN (V2→V1, V3→V2)
     # ========================================================================
     print("\n" + "=" * 70)
@@ -558,12 +492,6 @@ Examples:
     phase1_time = time.time() - phase1_start
     print(f"\n  Phase 1 time: {phase1_time:.2f} seconds")
 
-    # Memory cleanup after Phase 1
-    import gc
-    del merged_v1_v2, merged_right, volume_3_aligned_v2
-    gc.collect()
-    print("  [MEM] Cleaned up Phase 1 intermediate volumes")
-
     # ========================================================================
     # PHASE 2: LEFT CHAIN (V4→V1, V5→V4)
     # ========================================================================
@@ -592,11 +520,6 @@ Examples:
     )
     print(f"  ✓ Merged shape: {merged_v1_v4.shape}")
     np.save(data_dir / 'merged_v1_v4.npy', merged_v1_v4)
-
-    # Clean up before V5 alignment (V5 has large offsets)
-    del volume_2, volume_3
-    gc.collect()
-    print("  [MEM] Cleaned up V2, V3 before V5 alignment")
 
     # Step 2.3: V5 → V4
     print("\n[2.3] ALIGN V5 → V4")
@@ -627,11 +550,6 @@ Examples:
     combined_y_v5 = {'y_shift': combined_v5_to_v1['dy'], 'contour_y_offset': combined_v5_to_v1['dy'], 'ncc_y_offset': combined_v5_to_v1['dy']}
     combined_rot_v5 = {'rotation_angle': combined_v5_to_v1['rotation'], 'ncc_after': rot_v5['ncc_after'], 'rotation_axes': rot_v5['rotation_axes']}
 
-    # Clean up before large V5 transform (keep volume_4_aligned and merged_v1_v4 for later!)
-    del volume_5_aligned_v4
-    gc.collect()
-    print("  [MEM] Cleaned up before V5 combined transform")
-
     volume_5_aligned = apply_all_transformations_to_volume(
         volume_5, combined_xz_v5, combined_y_v5, step3_results=combined_rot_v5
     )
@@ -655,11 +573,17 @@ Examples:
     print("\n" + "=" * 70)
     print("MEMORY CLEANUP")
     print("=" * 70)
+    import gc
 
-    # Delete remaining original volumes and intermediates
-    del volume_4, volume_5, merged_left, merged_v1_v4
+    # Delete original volumes (we have aligned versions saved to disk)
+    del volume_2, volume_3, volume_4, volume_5
+    # Delete intermediate merged volumes
+    del merged_v1_v2, merged_v1_v4, merged_right, merged_left
+    # Delete intermediate aligned volumes that aren't needed
+    del volume_3_aligned_v2, volume_5_aligned_v4
+    # Force garbage collection
     gc.collect()
-    print("  ✓ Freed memory from remaining volumes")
+    print("  ✓ Freed memory from original and intermediate volumes")
 
     # ========================================================================
     # PHASE 3: FINAL MERGE (V1 AS STATIC ANCHOR)
@@ -690,41 +614,6 @@ Examples:
     # Save final merged volume
     np.save(data_dir / 'final_merged_5volumes.npy', final_merged)
     print(f"  [SAVED] final_merged_5volumes.npy")
-
-    # ========================================================================
-    # STEP: EXTRACT AND AVERAGE MIDDLE 30 B-SCANS
-    # ========================================================================
-    print("\n" + "=" * 70)
-    print("AVERAGING MIDDLE 30 B-SCANS")
-    print("=" * 70)
-
-    # Get middle 30 B-scans from final merged volume
-    Z = final_merged.shape[2]
-    z_center = Z // 2
-    z_start = z_center - 15
-    z_end = z_center + 15
-
-    print(f"  Final volume Z size: {Z}")
-    print(f"  Extracting B-scans [{z_start}:{z_end}] (middle 30)")
-
-    middle_bscans = final_merged[:, :, z_start:z_end]  # (Y, X, 30)
-
-    # Average along Z axis
-    averaged_bscan = np.mean(middle_bscans, axis=2)  # (Y, X)
-
-    print(f"  Averaged B-scan shape: {averaged_bscan.shape}")
-
-    # Save as .npy and .png
-    np.save(data_dir / 'averaged_middle_30_bscans.npy', averaged_bscan)
-
-    # Save as image
-    import cv2
-    avg_normalized = (averaged_bscan - averaged_bscan.min()) / (averaged_bscan.max() - averaged_bscan.min() + 1e-8)
-    avg_uint8 = (avg_normalized * 255).astype(np.uint8)
-    cv2.imwrite(str(data_dir / 'averaged_middle_30_bscans.png'), avg_uint8)
-
-    print(f"  [SAVED] averaged_middle_30_bscans.npy")
-    print(f"  [SAVED] averaged_middle_30_bscans.png")
 
     # ========================================================================
     # VISUALIZATION (OPTIONAL)

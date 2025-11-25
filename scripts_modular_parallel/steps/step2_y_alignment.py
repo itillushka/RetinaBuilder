@@ -12,6 +12,7 @@ import sys
 from multiprocessing import cpu_count
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor
+import cv2
 
 # Add parent directories to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -21,6 +22,73 @@ from helpers.rotation_alignment import (
     calculate_ncc
 )
 from helpers.rotation_alignment_parallel import shift_volume_y_parallel
+
+
+def visualize_bscan_with_surface(bscan_ref_denoised, bscan_mov_denoised, surface_ref, surface_mov,
+                                  y_shift, output_path, prefix=""):
+    """
+    Create visualization of DENOISED B-scans with detected surfaces for traceability.
+
+    Shows the actual denoised images that the contour detection algorithm works with.
+
+    Args:
+        bscan_ref_denoised: Denoised reference B-scan (Y, X) - same as used for surface detection
+        bscan_mov_denoised: Denoised moving B-scan (Y, X) - same as used for surface detection
+        surface_ref: Detected surface for reference (X,)
+        surface_mov: Detected surface for moving (X,)
+        y_shift: Applied Y-shift value
+        output_path: Path to save visualization
+        prefix: Prefix for title (e.g., "V2_to_V1")
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+
+    # Top-left: Reference DENOISED B-scan with surface
+    axes[0, 0].imshow(bscan_ref_denoised, cmap='gray', aspect='auto')
+    x_coords = np.arange(len(surface_ref))
+    axes[0, 0].plot(x_coords, surface_ref, 'g-', linewidth=2, label='Detected surface')
+    axes[0, 0].set_title(f'{prefix} Reference B-scan DENOISED (overlap region)', fontsize=12)
+    axes[0, 0].set_xlabel('X (pixels)')
+    axes[0, 0].set_ylabel('Y (pixels)')
+    axes[0, 0].legend(loc='upper right')
+
+    # Top-right: Moving DENOISED B-scan with surface
+    axes[0, 1].imshow(bscan_mov_denoised, cmap='gray', aspect='auto')
+    x_coords = np.arange(len(surface_mov))
+    axes[0, 1].plot(x_coords, surface_mov, 'r-', linewidth=2, label='Detected surface')
+    axes[0, 1].set_title(f'{prefix} Moving B-scan DENOISED (overlap region)', fontsize=12)
+    axes[0, 1].set_xlabel('X (pixels)')
+    axes[0, 1].set_ylabel('Y (pixels)')
+    axes[0, 1].legend(loc='upper right')
+
+    # Bottom-left: Both surfaces overlaid (before alignment)
+    axes[1, 0].plot(x_coords, surface_ref, 'g-', linewidth=2, label='Reference surface')
+    axes[1, 0].plot(x_coords, surface_mov, 'r-', linewidth=2, label='Moving surface')
+    axes[1, 0].set_title(f'Surface comparison (BEFORE alignment)', fontsize=12)
+    axes[1, 0].set_xlabel('X (pixels)')
+    axes[1, 0].set_ylabel('Y (pixels)')
+    axes[1, 0].legend(loc='upper right')
+    axes[1, 0].invert_yaxis()
+    axes[1, 0].grid(True, alpha=0.3)
+
+    # Bottom-right: Both surfaces overlaid (after alignment)
+    surface_mov_aligned = surface_mov + y_shift
+    axes[1, 1].plot(x_coords, surface_ref, 'g-', linewidth=2, label='Reference surface')
+    axes[1, 1].plot(x_coords, surface_mov_aligned, 'r--', linewidth=2, label=f'Moving surface (shifted {y_shift:+.1f}px)')
+    axes[1, 1].set_title(f'Surface comparison (AFTER alignment, Y-shift={y_shift:+.1f}px)', fontsize=12)
+    axes[1, 1].set_xlabel('X (pixels)')
+    axes[1, 1].set_ylabel('Y (pixels)')
+    axes[1, 1].legend(loc='upper right')
+    axes[1, 1].invert_yaxis()
+    axes[1, 1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  [SAVED] {output_path.name}")
 
 
 def _test_single_y_offset(offset, b0_norm, b1_norm, Y):
@@ -121,6 +189,8 @@ def contour_based_y_offset(bscan_v0, bscan_v1):
         y_offset: Offset to align surfaces (positive = shift v1 down)
         surface_v0: Detected surface for v0 (X,)
         surface_v1: Detected surface for v1 (X,)
+        b0_proc: Denoised reference B-scan (for visualization)
+        b1_proc: Denoised moving B-scan (for visualization)
     """
     # Preprocess for surface detection
     b0_proc = preprocess_oct_for_visualization(bscan_v0)
@@ -134,19 +204,23 @@ def contour_based_y_offset(bscan_v0, bscan_v1):
     surface_diff = surface_v0 - surface_v1
     y_offset = np.median(surface_diff)
 
-    return y_offset, surface_v0, surface_v1
+    return y_offset, surface_v0, surface_v1, b0_proc, b1_proc
 
 
-def perform_y_alignment(ref_volume, mov_volume):
+def perform_y_alignment(ref_volume, mov_volume, position='right', offset_x=0, output_dir=None, prefix=""):
     """
-    Y-alignment wrapper for multi-volume stitcher compatibility.
+    Y-alignment using CROPPED overlap region for calculation.
 
-    Simplified version that works directly on full volumes without
-    requiring Step 1 results or overlap regions.
+    Crops B-scans to the overlap region for accurate alignment at seams,
+    then applies the calculated shift to the full volume.
 
     Args:
         ref_volume: Reference volume (Y, X, Z)
         mov_volume: Volume to align (Y, X, Z)
+        position: 'right' or 'left' - position of moving volume relative to reference
+        offset_x: X offset from step 1 (negative = mov shifted left)
+        output_dir: Directory to save visualization (if provided)
+        prefix: Prefix for saved files (e.g., 'v2_to_v1')
 
     Returns:
         dict containing:
@@ -155,35 +229,65 @@ def perform_y_alignment(ref_volume, mov_volume):
             - 'contour_y_offset': Offset from contour method
             - 'ncc_y_offset': Offset from NCC method
     """
-    Y, X, Z = ref_volume.shape
-    z_center = Z // 2
+    Y, X_ref, Z_ref = ref_volume.shape
+    _, X_mov, _ = mov_volume.shape
+    z_center = Z_ref // 2
 
-    # Extract central B-scans for alignment calculation
-    bscan_ref = ref_volume[:, :, z_center].copy()  # (Y, X)
-    bscan_mov = mov_volume[:, :, z_center].copy()  # (Y, X)
+    # Extract central B-scans (full width first)
+    bscan_ref_full = ref_volume[:, :, z_center].copy()  # (Y, X)
+    bscan_mov_full = mov_volume[:, :, z_center].copy()  # (Y, X)
 
-    # Method 1: Contour-based surface detection
-    contour_offset, surface_ref, surface_mov = contour_based_y_offset(bscan_ref, bscan_mov)
+    # Calculate overlap width and CROP B-scans
+    offset_x_int = int(round(offset_x))
 
-    # Method 2: NCC search
-    ncc_offset, ncc_scores, offsets_tested = ncc_search_y_offset(bscan_ref, bscan_mov, search_range=100)
+    if position == 'right' and offset_x_int < 0:
+        # V2 is to the right, shifted left by |offset_x|
+        # V1: keep LAST |offset_x| pixels
+        # V2: keep FIRST |offset_x| pixels
+        overlap_width = min(abs(offset_x_int), X_ref, X_mov)
+        bscan_ref = bscan_ref_full[:, -overlap_width:]  # V1's last N px
+        bscan_mov = bscan_mov_full[:, :overlap_width]   # V2's first N px
+        print(f"  [Overlap] Cropped to last {overlap_width}px of ref, first {overlap_width}px of mov")
 
-    # Prioritize whichever method is closer to 50px displacement (expected overlap)
-    target_displacement = 50
-    ncc_distance = abs(abs(ncc_offset) - target_displacement)
-    contour_distance = abs(abs(contour_offset) - target_displacement)
+    elif position == 'left' and offset_x_int > 0:
+        # V2 is to the left, shifted right by offset_x
+        # V1: keep FIRST offset_x pixels
+        # V2: keep LAST offset_x pixels
+        overlap_width = min(offset_x_int, X_ref, X_mov)
+        bscan_ref = bscan_ref_full[:, :overlap_width]   # V1's first N px
+        bscan_mov = bscan_mov_full[:, -overlap_width:]  # V2's last N px
+        print(f"  [Overlap] Cropped to first {overlap_width}px of ref, last {overlap_width}px of mov")
 
-    if ncc_distance < contour_distance:
-        y_shift = ncc_offset
-        print(f"  Using NCC offset ({ncc_offset:+.1f}) - closer to {target_displacement}px than contour ({contour_offset:+.1f})")
     else:
-        y_shift = contour_offset
-        print(f"  Using contour offset ({contour_offset:+.1f}) - closer to {target_displacement}px than NCC ({ncc_offset:+.1f})")
+        # Fallback: use full B-scans
+        bscan_ref = bscan_ref_full
+        bscan_mov = bscan_mov_full
+        print(f"  [Overlap] Using full B-scans (no valid overlap info)")
 
-    # Clamp Y-shift to ±100 px max
-    if abs(y_shift) > 100:
-        print(f"  [CLAMP] Y-shift {y_shift:+.1f} exceeds ±100px limit, clamping to {np.clip(y_shift, -100, 100):+.1f}")
-        y_shift = np.clip(y_shift, -100, 100)
+    print(f"  [Overlap] B-scan shapes: ref={bscan_ref.shape}, mov={bscan_mov.shape}")
+
+    # Method 1: Contour-based surface detection (on CROPPED B-scans)
+    # Returns denoised B-scans for visualization
+    contour_offset, surface_ref, surface_mov, bscan_ref_denoised, bscan_mov_denoised = contour_based_y_offset(bscan_ref, bscan_mov)
+
+    # Method 2: NCC search (on CROPPED B-scans)
+    ncc_offset, ncc_scores, offsets_tested = ncc_search_y_offset(bscan_ref, bscan_mov, search_range=50)
+
+    # Always prioritize contour-based alignment (more reliable for surface detection)
+    y_shift = contour_offset
+    print(f"  Using contour offset ({contour_offset:+.1f}) [NCC was {ncc_offset:+.1f}]")
+
+    # Save visualization if output_dir provided (using DENOISED B-scans for traceability)
+    if output_dir is not None:
+        output_dir = Path(output_dir)
+        vis_filename = f"step2_y_alignment_{prefix}.png" if prefix else "step2_y_alignment.png"
+        visualize_bscan_with_surface(
+            bscan_ref_denoised, bscan_mov_denoised,  # Use DENOISED B-scans
+            surface_ref, surface_mov,
+            y_shift,
+            output_dir / vis_filename,
+            prefix=prefix.replace('_', ' ').upper() if prefix else ""
+        )
 
     # Apply Y-shift to full volume using PARALLEL method
     # (NO 2.0x multiplier - that's only for visualization)
@@ -262,13 +366,9 @@ def step2_y_alignment(step1_results, data_dir):
     print(f"   NCC offset:     {ncc_offset:+.2f} px")
     print(f"   Difference:     {offset_diff:.2f} px")
 
-    # Prioritize whichever method gives higher displacement
-    if abs(ncc_offset) > abs(contour_offset):
-        y_shift = ncc_offset
-        print(f"   [SELECTED] NCC offset ({ncc_offset:+.1f}) - higher displacement")
-    else:
-        y_shift = contour_offset
-        print(f"   [SELECTED] Contour offset ({contour_offset:+.1f}) - higher displacement")
+    # Always prioritize contour-based alignment (more reliable for surface detection)
+    y_shift = contour_offset
+    print(f"   [SELECTED] Contour offset ({contour_offset:+.1f}) [NCC was {ncc_offset:+.1f}]")
 
     print(f"\n5. Applying Y-shift: {y_shift:+.2f} px (PARALLEL)...")
 

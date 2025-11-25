@@ -34,11 +34,13 @@ except ImportError:
     print("⚠️  Warning: rotation_alignment module not available")
 
 
-def perform_z_rotation_alignment(ref_volume, mov_volume, visualize=False, position=None, output_dir=None, vis_interval=1):
+def perform_z_rotation_alignment(ref_volume, mov_volume, visualize=False, position=None, output_dir=None, vis_interval=1, offset_x=0):
     """
     Position-aware rotation alignment wrapper using CONTOUR-BASED method.
 
-    Uses surface contour variance minimization instead of NCC correlation.
+    Uses CROPPED overlap region for calculating rotation angle, then applies
+    rotation to the full volume. This ensures accurate alignment at seams.
+
     Rotates around appropriate axis based on volume position:
     - Horizontal volumes (left/right): Z-rotation (YX plane)
     - Vertical volumes (up/down): X-rotation (YZ plane)
@@ -51,6 +53,7 @@ def perform_z_rotation_alignment(ref_volume, mov_volume, visualize=False, positi
                  Used to select appropriate rotation axis
         output_dir: Directory to save visualizations (required if visualize=True)
         vis_interval: Visualize every N angles (default: 1 = all angles for debugging)
+        offset_x: X offset from step 1 (negative = mov shifted left)
 
     Returns:
         dict containing:
@@ -76,10 +79,41 @@ def perform_z_rotation_alignment(ref_volume, mov_volume, visualize=False, positi
     print(f"  Position '{position}': Using rotation axes {rotation_axes}")
     print(f"  Method: NCC correlation-based alignment")
 
-    # Find optimal rotation angle using NCC method (original)
+    # CROP volumes to overlap region for CALCULATING rotation angle
+    Y, X_ref, Z_ref = ref_volume.shape
+    _, X_mov, _ = mov_volume.shape
+    offset_x_int = int(round(offset_x))
+
+    if position == 'right' and offset_x_int < 0:
+        # V2 is to the right, shifted left by |offset_x|
+        # V1: keep LAST |offset_x| pixels
+        # V2: keep FIRST |offset_x| pixels
+        overlap_width = min(abs(offset_x_int), X_ref, X_mov)
+        ref_cropped = ref_volume[:, -overlap_width:, :]
+        mov_cropped = mov_volume[:, :overlap_width, :]
+        print(f"  [Overlap] Cropped to last {overlap_width}px of ref, first {overlap_width}px of mov")
+
+    elif position == 'left' and offset_x_int > 0:
+        # V2 is to the left, shifted right by offset_x
+        # V1: keep FIRST offset_x pixels
+        # V2: keep LAST offset_x pixels
+        overlap_width = min(offset_x_int, X_ref, X_mov)
+        ref_cropped = ref_volume[:, :overlap_width, :]
+        mov_cropped = mov_volume[:, -overlap_width:, :]
+        print(f"  [Overlap] Cropped to first {overlap_width}px of ref, last {overlap_width}px of mov")
+
+    else:
+        # Fallback: use full volumes
+        ref_cropped = ref_volume
+        mov_cropped = mov_volume
+        print(f"  [Overlap] Using full volumes (no valid overlap info)")
+
+    print(f"  [Overlap] Volume shapes for calculation: ref={ref_cropped.shape}, mov={mov_cropped.shape}")
+
+    # Find optimal rotation angle using NCC method on CROPPED volumes
     rotation_angle, rotation_metrics = find_optimal_rotation_z(
-        ref_volume,
-        mov_volume,
+        ref_cropped,
+        mov_cropped,
         coarse_range=15,  # Test ±15°
         coarse_step=1,
         fine_range=3,

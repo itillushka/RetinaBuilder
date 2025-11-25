@@ -166,15 +166,24 @@ def perform_y_alignment(ref_volume, mov_volume):
     contour_offset, surface_ref, surface_mov = contour_based_y_offset(bscan_ref, bscan_mov)
 
     # Method 2: NCC search
-    ncc_offset, ncc_scores, offsets_tested = ncc_search_y_offset(bscan_ref, bscan_mov, search_range=50)
+    ncc_offset, ncc_scores, offsets_tested = ncc_search_y_offset(bscan_ref, bscan_mov, search_range=100)
 
-    # Prioritize whichever method gives higher displacement
-    if abs(ncc_offset) > abs(contour_offset):
+    # Prioritize whichever method is closer to 50px displacement (expected overlap)
+    target_displacement = 50
+    ncc_distance = abs(abs(ncc_offset) - target_displacement)
+    contour_distance = abs(abs(contour_offset) - target_displacement)
+
+    if ncc_distance < contour_distance:
         y_shift = ncc_offset
-        print(f"  Using NCC offset ({ncc_offset:+.1f}) - higher than contour ({contour_offset:+.1f})")
+        print(f"  Using NCC offset ({ncc_offset:+.1f}) - closer to {target_displacement}px than contour ({contour_offset:+.1f})")
     else:
         y_shift = contour_offset
-        print(f"  Using contour offset ({contour_offset:+.1f}) - higher than NCC ({ncc_offset:+.1f})")
+        print(f"  Using contour offset ({contour_offset:+.1f}) - closer to {target_displacement}px than NCC ({ncc_offset:+.1f})")
+
+    # Clamp Y-shift to ±100 px max
+    if abs(y_shift) > 100:
+        print(f"  [CLAMP] Y-shift {y_shift:+.1f} exceeds ±100px limit, clamping to {np.clip(y_shift, -100, 100):+.1f}")
+        y_shift = np.clip(y_shift, -100, 100)
 
     # Apply Y-shift to full volume using PARALLEL method
     # (NO 2.0x multiplier - that's only for visualization)

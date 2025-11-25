@@ -80,7 +80,7 @@ def perform_z_rotation_alignment(ref_volume, mov_volume, visualize=False, positi
     rotation_angle, rotation_metrics = find_optimal_rotation_z(
         ref_volume,
         mov_volume,
-        coarse_range=15,  # Test ±15° as requested
+        coarse_range=15,  # Test ±15°
         coarse_step=1,
         fine_range=3,
         fine_step=0.5,

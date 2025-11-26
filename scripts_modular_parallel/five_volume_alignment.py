@@ -17,6 +17,8 @@ import numpy as np
 import argparse
 from pathlib import Path
 import time
+import json
+from datetime import datetime
 from multiprocessing import freeze_support
 
 # Import helper modules
@@ -129,23 +131,8 @@ def align_volume_pair(ref_volume, mov_volume, position, data_dir, prefix, visual
     print(f"    ✓ Rotation angle: {rotation_results['rotation_angle']:+.3f}°")
     print(f"    ✓ NCC after rotation: {rotation_results['ncc_after']:.4f}")
 
-    # Step 3.1: Y-correction after rotation (uses ROTATED volumes, CROPPED to overlap)
-    print(f"\n  [Y-Correction] Step 3.1: Y-axis correction after rotation...")
-    # Use rotated volume if rotation was applied, otherwise use y-aligned volume
-    volume_after_rotation = rotation_results['volume_1_rotated'] if rotation_results['volume_1_rotated'] is not None else y_results['volume_1_y_aligned']
-
-    y_correction_results = perform_y_alignment(
-        ref_volume,
-        volume_after_rotation,
-        position=position,
-        offset_x=xz_results['offset_x'],
-        output_dir=data_dir,
-        prefix=f"{prefix}_step3_1"
-    )
-    print(f"    ✓ Y-Correction: {y_correction_results['y_shift']:+.2f} px")
-
-    # Store correction in rotation_results for apply_all_transformations
-    rotation_results['y_shift_correction'] = y_correction_results['y_shift']
+    # No Step 3.1 Y-correction - Y alignment from Step 2 is sufficient
+    rotation_results['y_shift_correction'] = 0.0
 
     # Apply transformations to original volume
     print(f"\n  [Transform] Applying all transformations...")
@@ -616,6 +603,73 @@ Examples:
     print(f"  [SAVED] final_merged_5volumes.npy")
 
     # ========================================================================
+    # SAVE TRANSFORMS TO JSON
+    # ========================================================================
+    print("\n" + "=" * 70)
+    print("SAVING ALIGNMENT TRANSFORMS")
+    print("=" * 70)
+
+    # Build JSON structure with all transforms
+    # These are DIRECT transforms for B-scans (no inversion needed)
+    alignment_data = {
+        "patient": args.patient,
+        "timestamp": datetime.now().isoformat(),
+        "output_dir": str(data_dir),
+        "volumes": {
+            "v1": {
+                "path": str(patient_vols[0]),
+                "role": "reference",
+                "dx": 0,
+                "dy": 0,
+                "dz": 0,
+                "rotation": 0.0
+            },
+            "v2": {
+                "path": str(patient_vols[1]),
+                "dx": int(xz_v2['offset_x']),
+                "dy": float(y_v2['y_shift']),
+                "dz": int(xz_v2['offset_z']),
+                "rotation": float(rot_v2['rotation_angle'])
+            },
+            "v3": {
+                "path": str(patient_vols[2]),
+                "dx": int(combined_v3_to_v1['dx']),
+                "dy": float(combined_v3_to_v1['dy']),
+                "dz": int(combined_v3_to_v1['dz']),
+                "rotation": float(combined_v3_to_v1['rotation'])
+            },
+            "v4": {
+                "path": str(patient_vols[3]),
+                "dx": int(xz_v4['offset_x']),
+                "dy": float(y_v4['y_shift']),
+                "dz": int(xz_v4['offset_z']),
+                "rotation": float(rot_v4['rotation_angle'])
+            },
+            "v5": {
+                "path": str(patient_vols[4]),
+                "dx": int(combined_v5_to_v1['dx']),
+                "dy": float(combined_v5_to_v1['dy']),
+                "dz": int(combined_v5_to_v1['dz']),
+                "rotation": float(combined_v5_to_v1['rotation'])
+            }
+        }
+    }
+
+    json_path = data_dir / 'alignment_transforms.json'
+    with open(json_path, 'w') as f:
+        json.dump(alignment_data, f, indent=2)
+    print(f"  [SAVED] alignment_transforms.json")
+
+    # Print summary of transforms
+    print("\n  Transforms (relative to V1):")
+    for vol_name, vol_data in alignment_data['volumes'].items():
+        if vol_name == 'v1':
+            print(f"    {vol_name.upper()}: reference (no transform)")
+        else:
+            print(f"    {vol_name.upper()}: dx={vol_data['dx']:+d}, dy={vol_data['dy']:+.1f}, "
+                  f"dz={vol_data['dz']:+d}, rot={vol_data['rotation']:+.3f}deg")
+
+    # ========================================================================
     # VISUALIZATION (OPTIONAL)
     # ========================================================================
     viz_time = 0
@@ -677,9 +731,13 @@ Examples:
     print(f"    - merged_left_v1_v4_v5.npy")
     print(f"  Final:")
     print(f"    - final_merged_5volumes.npy")
+    print(f"    - alignment_transforms.json")
     if args.visual:
         print(f"  Visualizations:")
         print(f"    - 3d_merged_5volumes.png")
+
+    print("\n  To generate B-scan panorama, run:")
+    print(f"    python visualize_bscan_panorama.py {json_path}")
 
 
 if __name__ == '__main__':

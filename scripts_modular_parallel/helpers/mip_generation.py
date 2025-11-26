@@ -10,6 +10,31 @@ from scipy import signal
 from skimage import filters
 from joblib import Parallel, delayed
 from multiprocessing import cpu_count
+import cv2
+
+
+def preprocess_mip_for_correlation(mip):
+    """
+    Normalize brightness and enhance contrast before phase correlation.
+
+    Preprocessing steps:
+    1. Normalize to [0, 255] range
+    2. Apply CLAHE for contrast enhancement
+
+    Args:
+        mip: Input MIP image (2D array)
+
+    Returns:
+        Preprocessed MIP as float32
+    """
+    # Step 1: Normalize to 0-255 range
+    mip_norm = ((mip - mip.min()) / (mip.max() - mip.min() + 1e-8) * 255).astype(np.uint8)
+
+    # Step 2: CLAHE for contrast enhancement
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    mip_enhanced = clahe.apply(mip_norm)
+
+    return mip_enhanced.astype(np.float32)
 
 
 def _frangi_single_scale(image, sigma):
@@ -134,9 +159,13 @@ def register_mip_phase_correlation_legacy(mip1, mip2, max_offset_x=None, max_off
         confidence: Match quality score
         correlation: Full correlation map
     """
+    # Preprocess: normalize brightness and enhance contrast
+    mip1_proc = preprocess_mip_for_correlation(mip1)
+    mip2_proc = preprocess_mip_for_correlation(mip2)
+
     # Normalize images (remove mean and scale by std)
-    mip1_norm = (mip1 - mip1.mean()) / (mip1.std() + 1e-8)
-    mip2_norm = (mip2 - mip2.mean()) / (mip2.std() + 1e-8)
+    mip1_norm = (mip1_proc - mip1_proc.mean()) / (mip1_proc.std() + 1e-8)
+    mip2_norm = (mip2_proc - mip2_proc.mean()) / (mip2_proc.std() + 1e-8)
 
     # FFT-based correlation (MUCH faster than signal.correlate2d)
     # This can leverage optimized FFT libraries (FFTW, MKL) with multi-threading
@@ -210,14 +239,18 @@ def register_mip_phase_correlation(mip1, mip2, max_offset_x=None, max_offset_z=N
 
     print(f"  [Multi-scale] Searching with ±{max_offset_x}px X limit, ±{max_offset_z}px Z limit")
 
+    # Preprocess: normalize brightness and enhance contrast BEFORE pyramid
+    mip1_proc = preprocess_mip_for_correlation(mip1)
+    mip2_proc = preprocess_mip_for_correlation(mip2)
+
     for i, scale in enumerate(scales):
         # Downsample images
         if scale < 1.0:
-            mip1_scaled = zoom(mip1, scale, order=1)
-            mip2_scaled = zoom(mip2, scale, order=1)
+            mip1_scaled = zoom(mip1_proc, scale, order=1)
+            mip2_scaled = zoom(mip2_proc, scale, order=1)
         else:
-            mip1_scaled = mip1
-            mip2_scaled = mip2
+            mip1_scaled = mip1_proc
+            mip2_scaled = mip2_proc
 
         # Calculate search window at this scale
         if i == 0:  # Coarse scale - full search
@@ -227,7 +260,7 @@ def register_mip_phase_correlation(mip1, mip2, max_offset_x=None, max_offset_z=N
             search_x = int(15 * scale)  # ±15px refinement window
             search_z = int(15 * scale)
 
-        # Normalize
+        # Normalize (remove mean and scale by std)
         mip1_norm = (mip1_scaled - mip1_scaled.mean()) / (mip1_scaled.std() + 1e-8)
         mip2_norm = (mip2_scaled - mip2_scaled.mean()) / (mip2_scaled.std() + 1e-8)
 

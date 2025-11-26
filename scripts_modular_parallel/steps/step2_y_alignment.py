@@ -240,29 +240,42 @@ def perform_y_alignment(ref_volume, mov_volume, position='right', offset_x=0, ou
     # Calculate overlap width and CROP B-scans
     offset_x_int = int(round(offset_x))
 
-    if position == 'right' and offset_x_int < 0:
-        # V2 is to the right, shifted left by |offset_x|
-        # V1: keep LAST |offset_x| pixels
-        # V2: keep FIRST |offset_x| pixels
-        overlap_width = min(abs(offset_x_int), X_ref, X_mov)
-        bscan_ref = bscan_ref_full[:, -overlap_width:]  # V1's last N px
-        bscan_mov = bscan_mov_full[:, :overlap_width]   # V2's first N px
-        print(f"  [Overlap] Cropped to last {overlap_width}px of ref, first {overlap_width}px of mov")
+    if position == 'right':
+        # V2 is to the right of V1
+        # offset_x is NEGATIVE (e.g., -462 means V2 shifts left 462px to align)
+        # Overlap width = image_width - displacement (NOT the displacement itself!)
+        # Example: X=500, offset_x=-462 → overlap = 500 - 462 = 38px
+        overlap_width = min(X_ref, X_mov) - abs(offset_x_int)
+        if overlap_width > 0:
+            bscan_ref = bscan_ref_full[:, :overlap_width]   # V1's FIRST N px
+            bscan_mov = bscan_mov_full[:, :overlap_width]   # V2's FIRST N px
+            print(f"  [Overlap] position='right', offset_x={offset_x_int}, overlap_width={overlap_width}")
+            print(f"  [Overlap] Cropped V1 to FIRST {overlap_width}px, V2 to FIRST {overlap_width}px")
+        else:
+            bscan_ref = bscan_ref_full
+            bscan_mov = bscan_mov_full
+            print(f"  [Overlap] No overlap (offset_x={offset_x_int}), using full B-scans")
 
-    elif position == 'left' and offset_x_int > 0:
-        # V2 is to the left, shifted right by offset_x
-        # V1: keep FIRST offset_x pixels
-        # V2: keep LAST offset_x pixels
-        overlap_width = min(offset_x_int, X_ref, X_mov)
-        bscan_ref = bscan_ref_full[:, :overlap_width]   # V1's first N px
-        bscan_mov = bscan_mov_full[:, -overlap_width:]  # V2's last N px
-        print(f"  [Overlap] Cropped to first {overlap_width}px of ref, last {overlap_width}px of mov")
+    elif position == 'left':
+        # V2 is to the left of V1
+        # offset_x is POSITIVE (e.g., +462 means V2 shifts right 462px to align)
+        # Overlap width = image_width - displacement
+        overlap_width = min(X_ref, X_mov) - abs(offset_x_int)
+        if overlap_width > 0:
+            bscan_ref = bscan_ref_full[:, -overlap_width:]  # V1's LAST N px
+            bscan_mov = bscan_mov_full[:, -overlap_width:]  # V2's LAST N px
+            print(f"  [Overlap] position='left', offset_x={offset_x_int}, overlap_width={overlap_width}")
+            print(f"  [Overlap] Cropped V1 to LAST {overlap_width}px, V2 to LAST {overlap_width}px")
+        else:
+            bscan_ref = bscan_ref_full
+            bscan_mov = bscan_mov_full
+            print(f"  [Overlap] No overlap (offset_x={offset_x_int}), using full B-scans")
 
     else:
-        # Fallback: use full B-scans
+        # Fallback: unknown position
         bscan_ref = bscan_ref_full
         bscan_mov = bscan_mov_full
-        print(f"  [Overlap] Using full B-scans (no valid overlap info)")
+        print(f"  [Overlap] Unknown position='{position}', using full B-scans")
 
     print(f"  [Overlap] B-scan shapes: ref={bscan_ref.shape}, mov={bscan_mov.shape}")
 

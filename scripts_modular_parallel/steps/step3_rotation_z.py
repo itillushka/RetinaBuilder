@@ -22,7 +22,10 @@ try:
         create_rotation_search_summary,  # NEW: Summary visualization
         apply_rotation_z,
         find_optimal_y_shift_central_bscan,
-        visualize_contour_y_alignment
+        visualize_contour_y_alignment,
+        preprocess_oct_for_visualization,
+        detect_contour_surface,
+        calculate_rotation_edge_margin
     )
     from helpers.rotation_alignment_parallel import (
         apply_rotation_z_parallel,
@@ -32,6 +35,93 @@ try:
 except ImportError:
     ROTATION_AVAILABLE = False
     print("⚠️  Warning: rotation_alignment module not available")
+
+
+def visualize_step3_rotation(bscan_ref_denoised, bscan_mov_denoised, bscan_mov_rotated_denoised,
+                              surface_ref, surface_mov, surface_mov_rotated,
+                              rotation_angle, edge_margin, output_path, prefix=""):
+    """
+    Create visualization for Step 3 rotation alignment.
+
+    Shows:
+    - Reference B-scan with detected surface
+    - Moving B-scan BEFORE rotation with surface
+    - Moving B-scan AFTER rotation with surface
+    - Surface comparison before/after rotation
+
+    Args:
+        bscan_ref_denoised: Denoised reference B-scan (Y, X)
+        bscan_mov_denoised: Denoised moving B-scan BEFORE rotation (Y, X)
+        bscan_mov_rotated_denoised: Denoised moving B-scan AFTER rotation (Y, X)
+        surface_ref: Detected surface for reference (X,)
+        surface_mov: Detected surface for moving before rotation (X,)
+        surface_mov_rotated: Detected surface for moving after rotation (X,)
+        rotation_angle: Applied rotation angle (degrees)
+        edge_margin: Edge margin used for surface detection
+        output_path: Path to save visualization
+        prefix: Prefix for title
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+
+    X = len(surface_ref)
+    x_coords = np.arange(X)
+
+    # Top-left: Reference DENOISED B-scan with surface
+    axes[0, 0].imshow(bscan_ref_denoised, cmap='gray', aspect='auto')
+    axes[0, 0].plot(x_coords, surface_ref, 'g-', linewidth=2, label='Detected surface')
+    # Show edge margin regions
+    if edge_margin > 0:
+        axes[0, 0].axvspan(0, edge_margin, alpha=0.3, color='yellow', label=f'Edge margin ({edge_margin}px)')
+        axes[0, 0].axvspan(X - edge_margin, X, alpha=0.3, color='yellow')
+    axes[0, 0].set_title(f'{prefix} Reference B-scan (denoised, overlap region)', fontsize=12)
+    axes[0, 0].set_xlabel('X (pixels)')
+    axes[0, 0].set_ylabel('Y (pixels)')
+    axes[0, 0].legend(loc='upper right')
+
+    # Top-right: Moving DENOISED B-scan BEFORE rotation with surface
+    axes[0, 1].imshow(bscan_mov_denoised, cmap='gray', aspect='auto')
+    axes[0, 1].plot(x_coords, surface_mov, 'r-', linewidth=2, label='Detected surface')
+    if edge_margin > 0:
+        axes[0, 1].axvspan(0, edge_margin, alpha=0.3, color='yellow', label=f'Edge margin ({edge_margin}px)')
+        axes[0, 1].axvspan(X - edge_margin, X, alpha=0.3, color='yellow')
+    axes[0, 1].set_title(f'{prefix} Moving B-scan BEFORE rotation (denoised)', fontsize=12)
+    axes[0, 1].set_xlabel('X (pixels)')
+    axes[0, 1].set_ylabel('Y (pixels)')
+    axes[0, 1].legend(loc='upper right')
+
+    # Bottom-left: Moving DENOISED B-scan AFTER rotation with surface
+    axes[1, 0].imshow(bscan_mov_rotated_denoised, cmap='gray', aspect='auto')
+    axes[1, 0].plot(x_coords, surface_mov_rotated, 'b-', linewidth=2, label='Detected surface (after rotation)')
+    if edge_margin > 0:
+        axes[1, 0].axvspan(0, edge_margin, alpha=0.3, color='yellow', label=f'Edge margin ({edge_margin}px)')
+        axes[1, 0].axvspan(X - edge_margin, X, alpha=0.3, color='yellow')
+    axes[1, 0].set_title(f'{prefix} Moving B-scan AFTER rotation ({rotation_angle:+.2f}°)', fontsize=12)
+    axes[1, 0].set_xlabel('X (pixels)')
+    axes[1, 0].set_ylabel('Y (pixels)')
+    axes[1, 0].legend(loc='upper right')
+
+    # Bottom-right: Surface comparison (before and after rotation)
+    axes[1, 1].plot(x_coords, surface_ref, 'g-', linewidth=2, label='Reference surface')
+    axes[1, 1].plot(x_coords, surface_mov, 'r--', linewidth=2, alpha=0.7, label='Moving (before rotation)')
+    axes[1, 1].plot(x_coords, surface_mov_rotated, 'b-', linewidth=2, label=f'Moving (after {rotation_angle:+.2f}°)')
+    if edge_margin > 0:
+        axes[1, 1].axvspan(0, edge_margin, alpha=0.2, color='yellow', label=f'Edge margin ({edge_margin}px)')
+        axes[1, 1].axvspan(X - edge_margin, X, alpha=0.2, color='yellow')
+    axes[1, 1].set_title(f'Surface comparison (rotation={rotation_angle:+.2f}°)', fontsize=12)
+    axes[1, 1].set_xlabel('X (pixels)')
+    axes[1, 1].set_ylabel('Y (pixels)')
+    axes[1, 1].legend(loc='upper right')
+    axes[1, 1].invert_yaxis()
+    axes[1, 1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  [SAVED] {output_path.name}")
 
 
 def perform_z_rotation_alignment(ref_volume, mov_volume, visualize=False, position=None, output_dir=None, vis_interval=1, offset_x=0):
@@ -84,29 +174,42 @@ def perform_z_rotation_alignment(ref_volume, mov_volume, visualize=False, positi
     _, X_mov, _ = mov_volume.shape
     offset_x_int = int(round(offset_x))
 
-    if position == 'right' and offset_x_int < 0:
-        # V2 is to the right, shifted left by |offset_x|
-        # V1: keep LAST |offset_x| pixels
-        # V2: keep FIRST |offset_x| pixels
-        overlap_width = min(abs(offset_x_int), X_ref, X_mov)
-        ref_cropped = ref_volume[:, -overlap_width:, :]
-        mov_cropped = mov_volume[:, :overlap_width, :]
-        print(f"  [Overlap] Cropped to last {overlap_width}px of ref, first {overlap_width}px of mov")
+    if position == 'right':
+        # V2 is to the right of V1
+        # offset_x is NEGATIVE (e.g., -462 means V2 shifts left 462px to align)
+        # Overlap width = image_width - displacement (NOT the displacement itself!)
+        # Example: X=500, offset_x=-462 → overlap = 500 - 462 = 38px
+        overlap_width = min(X_ref, X_mov) - abs(offset_x_int)
+        if overlap_width > 0:
+            ref_cropped = ref_volume[:, :overlap_width, :]   # V1's FIRST N px
+            mov_cropped = mov_volume[:, :overlap_width, :]   # V2's FIRST N px
+            print(f"  [Overlap] position='right', offset_x={offset_x_int}, overlap_width={overlap_width}")
+            print(f"  [Overlap] Cropped V1 to FIRST {overlap_width}px, V2 to FIRST {overlap_width}px")
+        else:
+            ref_cropped = ref_volume
+            mov_cropped = mov_volume
+            print(f"  [Overlap] No overlap (offset_x={offset_x_int}), using full volumes")
 
-    elif position == 'left' and offset_x_int > 0:
-        # V2 is to the left, shifted right by offset_x
-        # V1: keep FIRST offset_x pixels
-        # V2: keep LAST offset_x pixels
-        overlap_width = min(offset_x_int, X_ref, X_mov)
-        ref_cropped = ref_volume[:, :overlap_width, :]
-        mov_cropped = mov_volume[:, -overlap_width:, :]
-        print(f"  [Overlap] Cropped to first {overlap_width}px of ref, last {overlap_width}px of mov")
+    elif position == 'left':
+        # V2 is to the left of V1
+        # offset_x is POSITIVE (e.g., +462 means V2 shifts right 462px to align)
+        # Overlap width = image_width - displacement
+        overlap_width = min(X_ref, X_mov) - abs(offset_x_int)
+        if overlap_width > 0:
+            ref_cropped = ref_volume[:, -overlap_width:, :]  # V1's LAST N px
+            mov_cropped = mov_volume[:, -overlap_width:, :]  # V2's LAST N px
+            print(f"  [Overlap] position='left', offset_x={offset_x_int}, overlap_width={overlap_width}")
+            print(f"  [Overlap] Cropped V1 to LAST {overlap_width}px, V2 to LAST {overlap_width}px")
+        else:
+            ref_cropped = ref_volume
+            mov_cropped = mov_volume
+            print(f"  [Overlap] No overlap (offset_x={offset_x_int}), using full volumes")
 
     else:
-        # Fallback: use full volumes
+        # Fallback: unknown position
         ref_cropped = ref_volume
         mov_cropped = mov_volume
-        print(f"  [Overlap] Using full volumes (no valid overlap info)")
+        print(f"  [Overlap] Unknown position='{position}', using full volumes")
 
     print(f"  [Overlap] Volume shapes for calculation: ref={ref_cropped.shape}, mov={mov_cropped.shape}")
 
@@ -120,15 +223,6 @@ def perform_z_rotation_alignment(ref_volume, mov_volume, visualize=False, positi
         fine_step=0.5,
         verbose=True  # Enable verbose for debugging
     )
-
-    # Extract central B-scan for visualization
-    Z = ref_volume.shape[2]
-    z_mid = Z // 2
-    bscan_v0 = ref_volume[:, :, z_mid]
-    bscan_v1 = mov_volume[:, :, z_mid]
-
-    # Note: NCC method visualization can be added later if needed
-    # For now, NCC method works as before without detailed per-angle visualization
 
     # Apply rotation if significant (> 0.5 degrees)
     # Apply rotation directly (NO inversion)
@@ -150,6 +244,63 @@ def perform_z_rotation_alignment(ref_volume, mov_volume, visualize=False, positi
         volume_1_rotated = None
         ncc_after = calculate_ncc_3d(ref_volume, mov_volume)
         print(f"  Rotation angle {rotation_angle:.2f}° too small, skipped")
+
+    # Generate visualization if requested
+    if visualize and output_dir is not None:
+        output_dir = Path(output_dir)
+        print(f"  Creating Step 3 visualization...")
+
+        # Extract central B-scans from CROPPED overlap region
+        z_mid = ref_cropped.shape[2] // 2
+        bscan_ref = ref_cropped[:, :, z_mid]
+        bscan_mov = mov_cropped[:, :, z_mid]
+
+        # Rotate the cropped moving B-scan for visualization
+        # Use +rotation_angle for B-scans (direct, same as search)
+        # Note: 3D volumes use -rotation_angle because they are vertically inverted
+        bscan_mov_rotated = ndimage.rotate(
+            bscan_mov,
+            angle=rotation_angle,  # Direct rotation for B-scans
+            axes=(0, 1),
+            reshape=False,
+            order=1,
+            mode='constant',
+            cval=0
+        )
+
+        # Denoise all B-scans
+        bscan_ref_denoised = preprocess_oct_for_visualization(bscan_ref)
+        bscan_mov_denoised = preprocess_oct_for_visualization(bscan_mov)
+        bscan_mov_rotated_denoised = preprocess_oct_for_visualization(bscan_mov_rotated)
+
+        # Calculate edge margin for rotation (same as used in rotation search)
+        H, W = bscan_mov.shape
+        edge_margin = calculate_rotation_edge_margin(H, W, rotation_angle)
+
+        # Detect surfaces with edge margin
+        surface_ref = detect_contour_surface(bscan_ref_denoised, edge_margin=edge_margin)
+        surface_mov = detect_contour_surface(bscan_mov_denoised, edge_margin=0)  # No edge margin for original
+        surface_mov_rotated = detect_contour_surface(bscan_mov_rotated_denoised, edge_margin=edge_margin)
+
+        # Save surface coordinates to CSV for verification
+        import csv
+        csv_filename = output_dir / "step3_surfaces.csv"
+        with open(csv_filename, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['x', 'surface_ref', 'surface_mov_before', 'surface_mov_after', 'edge_margin_px', 'rotation_angle_deg'])
+            for x in range(len(surface_ref)):
+                writer.writerow([x, surface_ref[x], surface_mov[x], surface_mov_rotated[x], edge_margin, rotation_angle])
+        print(f"  [SAVED] step3_surfaces.csv ({len(surface_ref)} points)")
+
+        # Create visualization
+        vis_filename = f"step3_rotation_alignment.png"
+        visualize_step3_rotation(
+            bscan_ref_denoised, bscan_mov_denoised, bscan_mov_rotated_denoised,
+            surface_ref, surface_mov, surface_mov_rotated,
+            rotation_angle, edge_margin,
+            output_dir / vis_filename,
+            prefix=position.upper() if position else ""
+        )
 
     return {
         'volume_1_rotated': volume_1_rotated,
@@ -237,13 +388,29 @@ def step3_rotation_z(step1_results, step2_results, data_dir, visualize=False):
         overlap_v1_rotated,
         search_range=20,
         step=1,
-        verbose=True
+        verbose=True,
+        rotation_angle=rotation_angle  # Pass rotation angle to calculate edge margin
     )
 
     # Create visualization for Step 3.1 only if requested
     if visualize:
         print(f"\n  Creating Step 3.1 visualization...")
         vis_data = y_shift_results[0]  # Get visualization data from results
+
+        # Save surface coordinates to CSV for verification
+        import csv
+        csv_filename = data_dir / "step3_1_surfaces.csv"
+        surface_v0 = vis_data['surface_v0']
+        surface_v1 = vis_data['surface_v1']
+        edge_margin_31 = vis_data.get('edge_margin', 0)
+        with open(csv_filename, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['x', 'surface_ref', 'surface_mov_rotated', 'diff', 'y_shift_correction', 'edge_margin_px'])
+            for x in range(len(surface_v0)):
+                diff = surface_v0[x] - surface_v1[x]
+                writer.writerow([x, surface_v0[x], surface_v1[x], diff, y_shift_correction, edge_margin_31])
+        print(f"  [SAVED] step3_1_surfaces.csv ({len(surface_v0)} points)")
+
         visualize_contour_y_alignment(
             bscan_v0=vis_data['bscan_v0'],
             bscan_v1=vis_data['bscan_v1'],
@@ -254,7 +421,8 @@ def step3_rotation_z(step1_results, step2_results, data_dir, visualize=False):
             y_shift=y_shift_correction,
             ncc_score=y_shift_ncc,
             confidence=vis_data['confidence'],
-            output_path=data_dir / 'step3_1_contour_y_alignment.png'
+            output_path=data_dir / 'step3_1_contour_y_alignment.png',
+            edge_margin=vis_data.get('edge_margin', 0)
         )
 
     # Apply Y-shift correction if significant using PARALLEL method

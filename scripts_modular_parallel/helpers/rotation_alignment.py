@@ -39,6 +39,33 @@ import os
 # PARALLEL PROCESSING HELPER FUNCTIONS
 # ============================================================================
 
+def calculate_rotation_edge_margin(height, width, angle_degrees):
+    """
+    Calculate how many pixels to skip from edges after rotation.
+
+    After rotating by angle θ, corners are zero-padded. To avoid false
+    surface detections, skip columns that may have incomplete tissue.
+
+    Args:
+        height: Image height (Y dimension)
+        width: Image width (X dimension)
+        angle_degrees: Rotation angle in degrees
+
+    Returns:
+        margin: Number of pixels to skip from each edge (left and right)
+    """
+    import math
+    angle_rad = math.radians(abs(angle_degrees))
+    # Margin based on image height and rotation angle
+    margin = int(math.ceil(height * math.sin(angle_rad)))
+    # Also consider width for safety
+    margin = max(margin, int(math.ceil(width * math.sin(angle_rad) * 0.5)))
+    # Minimum margin of 5px for any rotation, 0 for no rotation
+    if abs(angle_degrees) > 0.1:
+        margin = max(margin, 5)
+    return margin
+
+
 def _test_single_rotation_angle(angle, bscan_v0_proc, bscan_v1, mask_v0):
     """
     Worker function to test a single rotation angle.
@@ -70,6 +97,13 @@ def _test_single_rotation_angle(angle, bscan_v0_proc, bscan_v1, mask_v0):
             mask_v1 = bscan_v1_rotated > 0
 
         mask_combined = mask_v0 & mask_v1
+
+        # Exclude edge columns affected by rotation zero-padding
+        H, W = bscan_v1_rotated.shape
+        edge_margin = calculate_rotation_edge_margin(H, W, angle)
+        if edge_margin > 0 and edge_margin < W // 2:
+            mask_combined[:, :edge_margin] = False
+            mask_combined[:, -edge_margin:] = False
 
         # Check if enough valid pixels
         if mask_combined.sum() < 100:
@@ -112,17 +146,17 @@ def _test_single_rotation_angle(angle, bscan_v0_proc, bscan_v1, mask_v0):
 
 def preprocess_oct_for_rotation(img, mask=None):
     """
-    Preprocess OCT B-scan with VERY aggressive denoising and thresholding.
+    Preprocess OCT B-scan with EXTREME aggressive denoising and thresholding.
 
     This isolates clean retinal layer structures by removing speckle noise
     and zeroing out low-intensity regions.
 
-    Pipeline:
-      1. Non-local means denoising (h=25) - HARSH
-      2. Bilateral filtering (sigma=150) - HARSH
-      3. Median filter (kernel=15) - HARSH
-      4. Otsu thresholding (50% threshold - preserves tissue layers)
-      5. CLAHE contrast enhancement (clipLimit=3.0)
+    EXTREME HARSH DENOISING Pipeline:
+      1. Non-local means denoising (h=30) - ULTRA HARSH (+20%)
+      2. Bilateral filtering (sigma=180) - ULTRA HARSH (+20%)
+      3. Median filter (kernel=19) - ULTRA HARSH (+27%)
+      4. Otsu thresholding (85% threshold - keeps only strongest signals)
+      5. CLAHE contrast enhancement (clipLimit=3.6) - (+20%)
       6. Horizontal kernel filter (emphasizes layer structures)
 
     Args:
@@ -135,24 +169,24 @@ def preprocess_oct_for_rotation(img, mask=None):
     # Normalize to 0-255 first
     img_norm = ((img - img.min()) / (img.max() - img.min() + 1e-8) * 255).astype(np.uint8)
 
-    # Step 1: Non-local means denoising (HARSH - very effective for OCT speckle)
-    denoised1 = cv2.fastNlMeansDenoising(img_norm, h=25, templateWindowSize=7, searchWindowSize=21)
+    # Step 1: Non-local means denoising (ULTRA HARSH - +20%)
+    denoised1 = cv2.fastNlMeansDenoising(img_norm, h=30, templateWindowSize=7, searchWindowSize=21)
 
-    # Step 2: Bilateral filtering for edge-preserving smoothing (HARSH)
-    denoised2 = cv2.bilateralFilter(denoised1, d=11, sigmaColor=150, sigmaSpace=150)
+    # Step 2: Bilateral filtering for edge-preserving smoothing (ULTRA HARSH - +20%)
+    denoised2 = cv2.bilateralFilter(denoised1, d=11, sigmaColor=180, sigmaSpace=180)
 
-    # Step 3: Median filter to remove remaining noise (HARSH)
-    denoised3 = cv2.medianBlur(denoised2, 15)
+    # Step 3: Median filter to remove remaining noise (ULTRA HARSH - +27%)
+    denoised3 = cv2.medianBlur(denoised2, 19)
 
-    # Step 4: Threshold to keep only tissue layers (50% of Otsu - preserves layers)
+    # Step 4: Threshold to keep only strongest signals (85% of Otsu - EXTREME HARSH)
     thresh_val = cv2.threshold(denoised3, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[0]
-    thresh_val = int(thresh_val * 0.5)  # 50% of Otsu threshold (preserves tissue layers)
+    thresh_val = int(thresh_val * 0.85)  # 85% of Otsu threshold = EXTREME HARSH
 
     thresholded = denoised3.copy()
     thresholded[denoised3 < thresh_val] = 0
 
-    # Step 5: Enhance contrast (CLAHE)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    # Step 5: Enhance contrast (CLAHE - +20%)
+    clahe = cv2.createCLAHE(clipLimit=3.6, tileGridSize=(8, 8))
     enhanced = clahe.apply(thresholded)
 
     # Step 6: Emphasize horizontal structures (retinal layers)
@@ -175,11 +209,11 @@ def preprocess_oct_for_visualization(img):
     Same as preprocess_oct_for_rotation() but WITHOUT the horizontal kernel filter
     that can make images appear dark in matplotlib displays.
 
-    EXTRA HARSH DENOISING (for three_volume_alignment and averaged_bscan_alignment):
+    EXTREME HARSH DENOISING (for three_volume_alignment and averaged_bscan_alignment):
     - Stronger NLM denoising (h=30 vs 25) - +20%
     - Stronger bilateral filtering (sigma=180 vs 150) - +20%
     - Larger median filter (19x19 vs 15x15) - +27%
-    - EXTRA HARSH threshold (60% vs 50% of Otsu) - keeps only strongest signals
+    - EXTREME HARSH threshold (85% of Otsu) - keeps only strongest signals
     - Stronger CLAHE (clipLimit=3.6 vs 3.0) - +20%
 
     Args:
@@ -200,9 +234,9 @@ def preprocess_oct_for_visualization(img):
     # Step 3: Median filter (EXTRA HARSH - 27% larger kernel)
     denoised = cv2.medianBlur(denoised, 19)
 
-    # Step 4: Threshold (60% of Otsu - EXTRA HARSHER, keeps only strongest signals)
+    # Step 4: Threshold (85% of Otsu - EXTREME HARSH, keeps only strongest signals)
     thresh_val = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[0]
-    thresh_val = int(thresh_val * 0.6)  # 60% instead of 50% = EXTRA HARSH
+    thresh_val = int(thresh_val * 0.85)  # 85% of Otsu = EXTREME HARSH
     denoised[denoised < thresh_val] = 0
 
     # Step 5: CLAHE contrast enhancement (20% stronger)
@@ -214,18 +248,24 @@ def preprocess_oct_for_visualization(img):
     return denoised
 
 
-def detect_contour_surface(bscan_denoised):
+def detect_contour_surface(bscan_denoised, outlier_threshold=20, edge_margin=0):
     """
     Detect retinal surface using contour method (finds where tissue STARTS).
 
     This method works perfectly on denoised B-scans by finding the first
     white pixel (top boundary) in each column.
 
+    Includes outlier filtering: points that differ from neighbors by more than
+    outlier_threshold pixels are replaced with the average of neighbors.
+
     Args:
         bscan_denoised: Preprocessed B-scan (2D array, uint8, already denoised)
+        outlier_threshold: Max allowed deviation from neighbors (default: 20px)
+        edge_margin: Skip this many pixels from each side (default: 0)
 
     Returns:
-        surface: 1D array (X,) with Y positions of detected surface
+        surface: 1D array (X,) with Y positions of detected surface (outliers filtered)
+                 Edge margin pixels are filled with the nearest valid value.
     """
     Y, X = bscan_denoised.shape
     surface = np.zeros(X)
@@ -234,8 +274,16 @@ def detect_contour_surface(bscan_denoised):
     threshold = np.percentile(bscan_denoised, 70)
     _, binary = cv2.threshold(bscan_denoised, threshold, 255, cv2.THRESH_BINARY)
 
-    # For each column, find first white pixel (top boundary = tissue start)
-    for x in range(X):
+    # Determine valid range (skip edge_margin from each side)
+    x_start = edge_margin
+    x_end = X - edge_margin
+    if x_end <= x_start:
+        # Edge margin too large, use full range
+        x_start = 0
+        x_end = X
+
+    # For each column in valid range, find first white pixel (top boundary = tissue start)
+    for x in range(x_start, x_end):
         column = binary[:, x]
         white_pixels = np.where(column > 0)[0]
         if len(white_pixels) > 0:
@@ -244,7 +292,32 @@ def detect_contour_surface(bscan_denoised):
             # No tissue detected - use previous column or default
             surface[x] = surface[x-1] if x > 0 else Y // 4
 
-    return surface
+    # Fill edge margins with nearest valid value
+    if edge_margin > 0 and x_start < x_end:
+        # Left margin: fill with first valid value
+        surface[:x_start] = surface[x_start]
+        # Right margin: fill with last valid value
+        surface[x_end:] = surface[x_end - 1]
+
+    # PASS 1: Filter extreme outliers (>80px from global average)
+    global_avg = np.mean(surface[x_start:x_end])  # Only use valid range for average
+    surface_pass1 = surface.copy()
+    for x in range(X):
+        if abs(surface[x] - global_avg) > 80:
+            surface_pass1[x] = global_avg
+
+    # PASS 2: Filter smaller outliers (>20px from 6 neighbors)
+    surface_filtered = surface_pass1.copy()
+    for x in range(X):
+        left_idx = max(0, x - 3)
+        right_idx = min(X, x + 4)
+        neighbors = np.concatenate([surface_pass1[left_idx:x], surface_pass1[x+1:right_idx]])
+        if len(neighbors) > 0:
+            neighbor_avg = np.mean(neighbors)
+            if abs(surface_pass1[x] - neighbor_avg) > outlier_threshold:
+                surface_filtered[x] = neighbor_avg
+
+    return surface_filtered
 
 
 # ============================================================================
@@ -1119,7 +1192,7 @@ def calculate_tissue_threshold(img1, img2, percentile=50):
 
 def find_optimal_y_shift_central_bscan(overlap_v0, overlap_v1_rotated,
                                         search_range=20, step=1,
-                                        verbose=True):
+                                        verbose=True, rotation_angle=0.0):
     """
     Step 3.1: Find optimal Y-axis shift on central B-scan after rotation.
 
@@ -1136,16 +1209,23 @@ def find_optimal_y_shift_central_bscan(overlap_v0, overlap_v1_rotated,
         search_range: Unused (kept for compatibility)
         step: Unused (kept for compatibility)
         verbose: Print progress
+        rotation_angle: Rotation angle applied in Step 3 (degrees) - used to calculate edge margin
 
     Returns:
         best_shift: Optimal Y shift correction (pixels)
         best_ncc: NCC score at optimal shift (calculated for verification)
         results: List with single result dict
     """
-    # Extract central B-scan
+    # Extract central B-scan (full width - no cropping)
     z_center = overlap_v0.shape[2] // 2
     bscan_v0 = overlap_v0[:, :, z_center]  # (Y, X)
     bscan_v1 = overlap_v1_rotated[:, :, z_center]  # (Y, X)
+
+    # Calculate edge margin based on rotation angle (to exclude zero-padded corners)
+    # Use at least 40px, but more if rotation angle requires it
+    H, W = bscan_v1.shape
+    rotation_margin = calculate_rotation_edge_margin(H, W, rotation_angle)
+    edge_margin = max(40, rotation_margin)  # At least 40px, or more if rotation requires
 
     if verbose:
         print(f"\n{'='*70}")
@@ -1153,6 +1233,8 @@ def find_optimal_y_shift_central_bscan(overlap_v0, overlap_v1_rotated,
         print(f"{'='*70}")
         print(f"  Method: Surface detection (contour) - direct geometric alignment")
         print(f"  Using central B-scan: Z={z_center}/{overlap_v0.shape[2]}")
+        print(f"  Rotation angle from Step 3: {rotation_angle:+.2f}°")
+        print(f"  Edge margin: {edge_margin}px (base=40px, rotation={rotation_margin}px)")
 
     # Apply harsh denoising to both B-scans (same as Steps 3 & 3.5)
     # Use two versions: one for alignment (with horizontal filter), one for visualization (without)
@@ -1168,10 +1250,11 @@ def find_optimal_y_shift_central_bscan(overlap_v0, overlap_v1_rotated,
     bscan_v1_denoised_vis = preprocess_oct_for_visualization(bscan_v1)
 
     # Detect surfaces using contour method (on alignment-version images)
+    # Skip 40px from each side to reduce edge artifacts
     if verbose:
-        print(f"  Detecting retinal surfaces...")
-    surface_v0 = detect_contour_surface(bscan_v0_denoised_align)  # (X,) array
-    surface_v1 = detect_contour_surface(bscan_v1_denoised_align)  # (X,) array
+        print(f"  Detecting retinal surfaces (skipping {edge_margin}px edges)...")
+    surface_v0 = detect_contour_surface(bscan_v0_denoised_align, edge_margin=edge_margin)  # (X,) array
+    surface_v1 = detect_contour_surface(bscan_v1_denoised_align, edge_margin=edge_margin)  # (X,) array
 
     # Calculate surface difference (V0 - V1)
     diff = surface_v0 - surface_v1
@@ -1232,7 +1315,8 @@ def find_optimal_y_shift_central_bscan(overlap_v0, overlap_v1_rotated,
         'bscan_v0_denoised': bscan_v0_denoised_vis,  # WITHOUT horizontal kernel
         'bscan_v1_denoised': bscan_v1_denoised_vis,  # WITHOUT horizontal kernel
         'surface_v0': surface_v0,
-        'surface_v1': surface_v1
+        'surface_v1': surface_v1,
+        'edge_margin': edge_margin  # For visualization
     }]
 
     return float(y_shift), ncc_score, results
@@ -1245,7 +1329,8 @@ def find_optimal_y_shift_central_bscan(overlap_v0, overlap_v1_rotated,
 def visualize_contour_y_alignment(bscan_v0, bscan_v1,
                                    bscan_v0_denoised, bscan_v1_denoised,
                                    surface_v0, surface_v1, y_shift,
-                                   ncc_score, confidence, output_path=None):
+                                   ncc_score, confidence, output_path=None,
+                                   edge_margin=0):
     """
     Visualize Step 3.1 contour-based Y-axis alignment.
 
@@ -1254,6 +1339,7 @@ def visualize_contour_y_alignment(bscan_v0, bscan_v1,
     - Detected surface contours
     - Surface difference plot
     - Before/after alignment comparison
+    - Edge margin regions (if edge_margin > 0)
 
     Args:
         bscan_v0: Original reference B-scan (Y, X)
@@ -1266,6 +1352,7 @@ def visualize_contour_y_alignment(bscan_v0, bscan_v1,
         ncc_score: NCC score at optimal shift
         confidence: Detection confidence (0-1)
         output_path: Where to save the figure
+        edge_margin: Pixels skipped from each edge (default: 0)
     """
     import matplotlib.pyplot as plt
 
@@ -1312,6 +1399,12 @@ def visualize_contour_y_alignment(bscan_v0, bscan_v1,
     ax4 = fig.add_subplot(gs[1, 0])
     ax4.imshow(bscan_v0_denoised, cmap='gray', aspect='auto')
     ax4.plot(surface_v0, 'r-', linewidth=4, label='Detected Surface')
+    # Show edge margin regions (skipped during detection)
+    if edge_margin > 0:
+        ax4.axvline(x=edge_margin, color='yellow', linestyle='--', linewidth=2, label=f'Edge margin ({edge_margin}px)')
+        ax4.axvline(x=X - edge_margin, color='yellow', linestyle='--', linewidth=2)
+        ax4.axvspan(0, edge_margin, alpha=0.2, color='yellow')
+        ax4.axvspan(X - edge_margin, X, alpha=0.2, color='yellow')
     ax4.set_title('V0 - Denoised (Single B-scan) + Surface', fontsize=11, fontweight='bold')
     ax4.set_xlabel('X (A-scans)')
     ax4.set_ylabel('Y (depth)')
@@ -1321,6 +1414,12 @@ def visualize_contour_y_alignment(bscan_v0, bscan_v1,
     ax5 = fig.add_subplot(gs[1, 1])
     ax5.imshow(bscan_v1_denoised, cmap='gray', aspect='auto')
     ax5.plot(surface_v1, 'b-', linewidth=4, label='Detected Surface')
+    # Show edge margin regions (skipped during detection)
+    if edge_margin > 0:
+        ax5.axvline(x=edge_margin, color='yellow', linestyle='--', linewidth=2, label=f'Edge margin ({edge_margin}px)')
+        ax5.axvline(x=X - edge_margin, color='yellow', linestyle='--', linewidth=2)
+        ax5.axvspan(0, edge_margin, alpha=0.2, color='yellow')
+        ax5.axvspan(X - edge_margin, X, alpha=0.2, color='yellow')
     ax5.set_title('V1 - Denoised (Single B-scan) + Surface', fontsize=11, fontweight='bold')
     ax5.set_xlabel('X (A-scans)')
     ax5.set_ylabel('Y (depth)')
@@ -1337,6 +1436,12 @@ def visualize_contour_y_alignment(bscan_v0, bscan_v1,
     ax6.axhline(0, color='gray', linestyle='-', linewidth=1)
     ax6.fill_between(x_coords, y_shift - np.std(diff[valid]), y_shift + np.std(diff[valid]),
                       alpha=0.3, color='red', label=f'±1 std: {np.std(diff[valid]):.2f} px')
+    # Show edge margin regions on difference plot
+    if edge_margin > 0:
+        ax6.axvline(x=edge_margin, color='yellow', linestyle='--', linewidth=2)
+        ax6.axvline(x=X - edge_margin, color='yellow', linestyle='--', linewidth=2)
+        ax6.axvspan(0, edge_margin, alpha=0.2, color='yellow')
+        ax6.axvspan(X - edge_margin, X, alpha=0.2, color='yellow')
     ax6.set_title('Surface Difference (V0 - V1)', fontsize=11, fontweight='bold')
     ax6.set_xlabel('X (A-scans)')
     ax6.set_ylabel('Y difference (pixels)')
@@ -2442,6 +2547,15 @@ def _test_single_rotation_angle_contour(angle, bscan_v0, bscan_v1):
 
         # Create mask for valid regions
         mask_2d, mask_columns = create_rotation_mask(bscan_v0, bscan_v1_rotated)
+
+        # Exclude edge columns affected by rotation zero-padding
+        H, W = bscan_v1_rotated.shape
+        edge_margin = calculate_rotation_edge_margin(H, W, angle)
+        if edge_margin > 0 and edge_margin < W // 2:
+            mask_columns[:edge_margin] = False
+            mask_columns[-edge_margin:] = False
+            mask_2d[:, :edge_margin] = False
+            mask_2d[:, -edge_margin:] = False
 
         # Check if enough valid pixels
         if mask_columns.sum() < 10:  # Need at least 10 valid columns

@@ -1,0 +1,43 @@
+{
+  "patient": "EM005",
+  "timestamp": "2025-11-26T21:56:22.049688",
+  "output_dir": "C:\\Users\\illia\\Desktop\\diploma\\RetinaBuilder\\scripts_modular_parallel\\results_5vol_em005",
+  "volumes": {
+    "v1": {
+      "path": "C:\\Users\\illia\\Desktop\\diploma\\RetinaBuilder\\oct_data\\emmetropes\\EM005\\AUTO20251113132602_IP_EM005_20251113_130515_Retina_3D_L_6mm_1536x360",
+      "role": "reference",
+      "dx": 0,
+      "dy": 0,
+      "dz": 0,
+      "rotation": 0.0
+    },
+    "v2": {
+      "path": "C:\\Users\\illia\\Desktop\\diploma\\RetinaBuilder\\oct_data\\emmetropes\\EM005\\AUTO20251113132602_IP_EM005_20251113_130709_Retina_3D_L_6mm_1536x360",
+      "dx": -462,
+      "dy": -28.0,
+      "dz": -6,
+      "rotation": -1.5
+    },
+    "v3": {
+      "path": "C:\\Users\\illia\\Desktop\\diploma\\RetinaBuilder\\oct_data\\emmetropes\\EM005\\AUTO20251113132602_IP_EM005_20251113_130820_Retina_3D_L_6mm_1536x360",
+      "dx": -900,
+      "dy": -99.0,
+      "dz": -6,
+      "rotation": -5.5
+    },
+    "v4": {
+      "path": "C:\\Users\\illia\\Desktop\\diploma\\RetinaBuilder\\oct_data\\emmetropes\\EM005\\AUTO20251113132602_IP_EM005_20251113_130902_Retina_3D_L_6mm_1536x360",
+      "dx": 364,
+      "dy": -67.0,
+      "dz": -4,
+      "rotation": 3.5
+    },
+    "v5": {
+      "path": "C:\\Users\\illia\\Desktop\\diploma\\RetinaBuilder\\oct_data\\emmetropes\\EM005\\AUTO20251113132602_IP_EM005_20251113_130946_Retina_3D_L_6mm_1536x360",
+      "dx": 920,
+      "dy": -22.0,
+      "dz": -2,
+      "rotation": 5.5
+    }
+  }
+}

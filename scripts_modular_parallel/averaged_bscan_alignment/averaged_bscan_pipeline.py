@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from helpers.oct_loader import OCTImageProcessor, OCTVolumeLoader
 
 # Import our new modules
-from bscan_averaging import (
+from .bscan_averaging import (
     extract_averaged_central_bscan,
     shift_bscan_2d,
     rotate_bscan_2d,
@@ -39,7 +39,7 @@ from bscan_averaging import (
     visualize_surface_comparison,
     visualize_three_averaged_bscans
 )
-from averaged_alignment_steps import (
+from .averaged_alignment_steps import (
     perform_x_fine_tuning_2d,
     perform_y_alignment_2d,
     perform_rotation_alignment_2d,

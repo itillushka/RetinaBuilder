@@ -36,6 +36,3 @@ __pycache__/
 standalone_merged_volume.npy
 *.npy
 data/*.npy
-*.png
-*.jpg
-*.jpeg

@@ -5,8 +5,9 @@ Visualize B-Scan Panorama from Alignment Transforms
 Loads alignment transforms from JSON file and creates a panorama by:
 1. Loading original volumes
 2. Extracting central B-scans
-3. Applying transforms DIRECTLY (rotation, then shift)
-4. Stitching into panorama
+3. Denoising and normalizing brightness
+4. Applying transforms DIRECTLY (rotation, then shift)
+5. Stitching into panorama
 
 Usage:
     python visualize_bscan_panorama.py <alignment_transforms.json>
@@ -19,6 +20,7 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy import ndimage
+import cv2
 
 # Add parent directory to path for imports
 import sys
@@ -47,6 +49,88 @@ def extract_central_bscan(volume, n_bscans=30):
     averaged_bscan = np.mean(central_bscans, axis=2)
 
     return averaged_bscan
+
+
+def denoise_bscan(img):
+    """
+    Denoise B-scan using the same pipeline as the alignment.
+
+    Pipeline:
+      1. Normalize to 0-255
+      2. Non-local means denoising (h=30)
+      3. Bilateral filtering (sigma=180)
+      4. Median filter (kernel=19)
+      5. Threshold (85% of Otsu)
+      6. CLAHE contrast enhancement
+
+    Args:
+        img: Input B-scan (2D array, float)
+
+    Returns:
+        Denoised uint8 image
+    """
+    # Normalize to 0-255
+    img_norm = ((img - img.min()) / (img.max() - img.min() + 1e-8) * 255).astype(np.uint8)
+
+    # Step 1: Non-local means denoising
+    denoised = cv2.fastNlMeansDenoising(img_norm, h=30, templateWindowSize=7, searchWindowSize=21)
+
+    # Step 2: Bilateral filtering
+    denoised = cv2.bilateralFilter(denoised, d=11, sigmaColor=180, sigmaSpace=180)
+
+    # Step 3: Median filter
+    denoised = cv2.medianBlur(denoised, 19)
+
+    # Step 4: Threshold (85% of Otsu)
+    thresh_val = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[0]
+    thresh_val = int(thresh_val * 0.85)
+    denoised[denoised < thresh_val] = 0
+
+    # Step 5: CLAHE contrast enhancement
+    clahe = cv2.createCLAHE(clipLimit=3.6, tileGridSize=(8, 8))
+    denoised = clahe.apply(denoised)
+
+    return denoised
+
+
+def normalize_brightness(bscans):
+    """
+    Normalize brightness across all B-scans to have consistent appearance.
+
+    Uses percentile-based normalization to handle different exposure levels.
+
+    Args:
+        bscans: Dict of B-scans {'v1': bscan, ...}
+
+    Returns:
+        Dict of normalized B-scans (float, 0-1 range)
+    """
+    # Calculate global statistics from all B-scans
+    all_values = []
+    for bscan in bscans.values():
+        # Only consider non-zero pixels (tissue)
+        nonzero = bscan[bscan > 0]
+        if len(nonzero) > 0:
+            all_values.append(nonzero)
+
+    if not all_values:
+        return bscans
+
+    all_values = np.concatenate(all_values)
+
+    # Use percentiles for robust normalization
+    p_low = np.percentile(all_values, 2)
+    p_high = np.percentile(all_values, 98)
+
+    # Normalize each B-scan
+    normalized = {}
+    for vol_name, bscan in bscans.items():
+        bscan_norm = bscan.astype(np.float32)
+        bscan_norm = np.clip(bscan_norm, p_low, p_high)
+        bscan_norm = (bscan_norm - p_low) / (p_high - p_low + 1e-8)
+        normalized[vol_name] = bscan_norm
+
+    return normalized
 
 
 def apply_transform_to_bscan(bscan, dx, dy, rotation):
@@ -161,12 +245,16 @@ def create_panorama(bscans, transforms, output_path):
 
     print(f"  Final panorama shape: {panorama.shape}")
 
-    # Save as PNG
+    # Save as PNG and NPY
     output_path = Path(output_path)
     panorama_norm = ((panorama - panorama.min()) / (panorama.max() - panorama.min()) * 255).astype(np.uint8)
-    import cv2
     cv2.imwrite(str(output_path), panorama_norm)
     print(f"  [SAVED] {output_path}")
+
+    # Save as numpy array for further analysis (e.g., curvature analysis)
+    npy_path = str(output_path).replace('.png', '.npy')
+    np.save(npy_path, panorama)
+    print(f"  [SAVED] {npy_path}")
 
     # Create labeled visualization
     fig, ax = plt.subplots(figsize=(20, 6))
@@ -226,7 +314,7 @@ def main():
     processor = OCTImageProcessor(sidebar_width=250, crop_top=100, crop_bottom=50)
     loader = OCTVolumeLoader(processor)
 
-    bscans = {}
+    bscans_raw = {}
     transforms = {}
 
     for vol_name, vol_data in alignment_data['volumes'].items():
@@ -236,13 +324,17 @@ def main():
         volume = loader.load_volume_from_directory(str(vol_path))
         bscan = extract_central_bscan(volume, args.n_bscans)
 
+        # Denoise B-scan (same as alignment pipeline)
+        print(f"      Denoising...")
+        bscan = denoise_bscan(bscan)
+
         # Apply rotation transform directly to B-scan
         rotation = vol_data.get('rotation', 0.0)
         if abs(rotation) > 0.01:
             bscan = apply_transform_to_bscan(bscan, 0, 0, rotation)
             print(f"      Applied rotation: {rotation:+.3f} deg")
 
-        bscans[vol_name] = bscan
+        bscans_raw[vol_name] = bscan
         transforms[vol_name] = {
             'dx': vol_data['dx'],
             'dy': vol_data['dy'],
@@ -251,6 +343,10 @@ def main():
 
         # Free volume memory
         del volume
+
+    # Normalize brightness across all B-scans
+    print("\n  Normalizing brightness across all B-scans...")
+    bscans = normalize_brightness(bscans_raw)
 
     # Print transforms
     print("\n  Transforms (relative to V1):")
